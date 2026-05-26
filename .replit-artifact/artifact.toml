@@ -1,0 +1,27 @@
+kind = "mobile"
+previewPath = "/"
+title = "NasoSan Player"
+version = "1.0.0"
+id = "artifacts/nasosan-player"
+router = "expo-domain"
+
+[[integratedSkills]]
+name = "expo"
+version = "1.0.0"
+
+[[services]]
+ensurePreviewReachable = "/status"
+name = "expo"
+paths = [ "/" ]
+localPort = 24486
+
+[services.development]
+run = "pnpm --filter @workspace/nasosan-player run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/nasosan-player", "run", "build" ]
+run = [ "pnpm", "--filter", "@workspace/nasosan-player", "run", "serve" ]
+
+[services.env]
+PORT = "24486"
+BASE_PATH = "/"
