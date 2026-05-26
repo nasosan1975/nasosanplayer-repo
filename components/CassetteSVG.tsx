@@ -12,7 +12,7 @@ import Svg, {
   Text as SvgText,
 } from "react-native-svg";
 
-const APP_VERSION = "v.0.795";
+const APP_VERSION = "v.0.845";
 
 interface CassetteProps {
   folderName: string;
@@ -201,11 +201,11 @@ export default function CassetteSVG({
   const rightWindingR = MIN_WINDING_R + (MAX_R - MIN_WINDING_R) * p;
 
   // Scale: fit within available width AND height in landscape
-  const maxW = isLandscape ? Math.min(width * 0.62, 500) : width - 24;
-  const maxH = isLandscape ? height - 110 : height;
+  const maxW = isLandscape ? Math.min(width * 0.62, 500) : Math.max(1, width - 24);
+  const maxH = isLandscape ? Math.max(1, height - 110) : Math.max(1, height);
   const scaleW = maxW / svgW;
   const scaleH = maxH / svgH;
-  const scale = isLandscape ? Math.min(scaleW, scaleH) : scaleW;
+  const scale = Math.max(0.01, isLandscape ? Math.min(scaleW, scaleH) : scaleW);
   const containerW = svgW * scale;
   const containerH = svgH * scale;
 
