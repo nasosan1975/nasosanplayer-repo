@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:expo.dev)",
+      "WebSearch",
+      "WebFetch(domain:central.sonatype.com)",
+      "WebFetch(domain:mvnrepository.com)",
+      "Bash(gh api *)",
+      "WebFetch(domain:github.com)"
+    ]
+  }
+}
