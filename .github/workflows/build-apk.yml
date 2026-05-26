@@ -1,0 +1,30 @@
+name: Build APK
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Setup Expo
+        uses: expo/expo-github-action@v8
+        with:
+          eas-version: latest
+          token: NeJeIbXO4NKK5yzvQ_yJAYfujfrwmpKsjpJkRdrn
+      - name: Installa dipendenze
+        run: npm install
+      - name: Build APK (locale)
+        run: eas build --platform android --profile preview --local --non-interactive --output ./app-build.apk
+      - name: Carica APK come artefatto
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-android
+          path: ./app-build.apk
+          retention-days: 1
