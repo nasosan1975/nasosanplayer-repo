@@ -1,0 +1,56 @@
+{
+  "expo": {
+    "name": "NasoSan Player",
+    "slug": "nasosanplayer",
+    "version": "1.0.1",
+    "orientation": "default",
+    "icon": "./assets/images/icon.png",
+    "scheme": "nasosan-player",
+    "userInterfaceStyle": "dark",
+    "splash": {
+      "image": "./assets/images/icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#1e1e26"
+    },
+    "ios": {
+      "supportsTablet": false,
+      "infoPlist": {
+        "UIBackgroundModes": ["audio"]
+      }
+    },
+    "android": {
+      "newArchEnabled": false,
+      "versionCode": 2,
+      "package": "com.nasosan.nasosanplayer",
+      "permissions": [
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.READ_MEDIA_AUDIO",
+        "android.permission.WAKE_LOCK",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"
+      ]
+    },
+    "web": {
+      "favicon": "./assets/images/icon.png"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-font",
+      "expo-web-browser",
+      "./plugins/withRNTPPatch",
+      "./plugins/withAndroidAuto",
+      "./plugins/withWmaPlayer",
+      "./plugins/withVolumeAnalyzer",
+      "./plugins/withAbiFilter",
+      "./plugins/withDisableNewArch"
+    ],
+    "experiments": {
+      "typedRoutes": true
+    },
+    "extra": {
+      "eas": {
+        "projectId": "82b696f0-b8f7-4344-85f2-a7b9c3b5bb20"
+      }
+    }
+  }
+}
