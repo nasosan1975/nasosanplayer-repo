@@ -305,7 +305,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     const s = rtpPlaybackState.state;
     if (!s) return;
-    const playing = s === State.Playing;
+    const playing = s === State.Playing || s === State.Buffering || s === State.Loading;
     const paused = s === State.Paused || s === State.Ready;
     setIsPlaying(playing);
     isPlayingRef.current = playing;
