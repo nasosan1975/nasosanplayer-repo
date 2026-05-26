@@ -18,9 +18,11 @@ export function useCarMode(): boolean {
     if (Platform.OS !== "android" || !CarModeModule) return;
 
     let active = true;
+    let inCar = false;
 
     async function enterCar() {
-      if (!active) return;
+      if (!active || inCar) return;
+      inCar = true;
       setIsCarMode(true);
       try {
         await ScreenOrientation.lockAsync(
@@ -32,6 +34,7 @@ export function useCarMode(): boolean {
 
     async function exitCar() {
       if (!active) return;
+      inCar = false;
       setIsCarMode(false);
       try {
         await ScreenOrientation.unlockAsync();
