@@ -10,6 +10,7 @@ import {
 
 import { usePlayer } from "@/context/PlayerContext";
 import TimeDisplay from "@/components/TimeDisplay";
+import { C } from "@/constants/colors";
 
 interface BtnProps {
   onPress?: () => void;
@@ -50,9 +51,11 @@ export default function BottomRow() {
   const {
     shuffleMode,
     favoritesMode,
+    currentTrack,
     toggleShuffle,
     regenerateShuffle,
     toggleFavorites,
+    toggleFavorite,
     activeList,
     currentIndexInActive,
     showNoFavoritesMsg,
@@ -66,9 +69,14 @@ export default function BottomRow() {
       </Btn>
 
       {/* Favorites */}
-      <Btn onPress={toggleFavorites} active={favoritesMode} label="FAV">
-        <Text style={[styles.icon, favoritesMode && styles.iconActive]}>
-          {favoritesMode ? "★" : "☆"}
+      <Btn
+        onPress={() => { if (currentTrack) toggleFavorite(currentTrack.id); }}
+        onLongPress={toggleFavorites}
+        active={favoritesMode}
+        label="FAV"
+      >
+        <Text style={[styles.icon, currentTrack?.favorite && styles.iconActive]}>
+          {currentTrack?.favorite ? "★" : "☆"}
         </Text>
       </Btn>
 
@@ -93,8 +101,8 @@ export default function BottomRow() {
 }
 
 const BTN_BASE = {
-  backgroundColor: "#2a2a36",
-  borderColor: "#4a4a5a",
+  backgroundColor: C.panels,
+  borderColor: C.borderInput,
   borderWidth: 1.5,
   borderRadius: 6,
   paddingHorizontal: 10,
@@ -113,38 +121,38 @@ const styles = StyleSheet.create({
   },
   btn: BTN_BASE,
   btnActive: {
-    borderColor: "#64c8ff",
+    borderColor: C.accent,
   },
   icon: {
     fontSize: 18,
-    color: "#c8c8d2",
+    color: C.text,
     lineHeight: 22,
   },
   iconActive: {
-    color: "#64c8ff",
+    color: C.accent,
   },
   label: {
-    color: "#8cc8ff",
+    color: C.notes,
     fontSize: 8,
     marginTop: 2,
     fontFamily: "monospace" as const,
   },
   labelActive: {
-    color: "#64c8ff",
+    color: C.accent,
   },
   counter: {
     flex: 1,
     alignSelf: "stretch",
-    backgroundColor: "#16161e",
+    backgroundColor: C.dark,
     borderRadius: 6,
     borderWidth: 1,
-    borderColor: "#3a3a4a",
+    borderColor: C.separators,
     paddingHorizontal: 6,
     alignItems: "center",
     justifyContent: "center",
   },
   counterText: {
-    color: "#64c8ff",
+    color: C.accent,
     fontFamily: "monospace" as const,
     fontSize: 12,
     lineHeight: 14,
