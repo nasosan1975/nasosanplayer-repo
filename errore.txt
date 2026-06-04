@@ -9,7 +9,7 @@ npm warn ERESOLVE overriding peer dependency
 npm warn ERESOLVE overriding peer dependency
 npm warn ERESOLVE overriding peer dependency
 
-up to date, audited 801 packages in 23s
+up to date, audited 801 packages in 1m
 
 85 packages are looking for funding
   run `npm fund` for details
