@@ -1,8 +1,9 @@
 {
   "expo": {
+    "owner": "nasosanmii",
     "name": "NasoSan Player",
     "slug": "nasosanplayer",
-    "version": "1.0.1",
+    "version": "1.0.3",
     "orientation": "default",
     "icon": "./assets/images/icon.png",
     "scheme": "nasosan-player",
@@ -37,8 +38,7 @@
       "expo-router",
       "expo-font",
       "expo-web-browser",
-      "./plugins/withRNTPPatch",
-      "./plugins/withAndroidAuto",
+      "./plugins/withMedia3Player",
       "./plugins/withWmaPlayer",
       "./plugins/withVolumeAnalyzer",
       "./plugins/withAbiFilter",
@@ -49,7 +49,7 @@
     },
     "extra": {
       "eas": {
-        "projectId": "82b696f0-b8f7-4344-85f2-a7b9c3b5bb20"
+        "projectId": "b590e669-69bd-43f3-997d-5bc7258d1703"
       }
     }
   }
