@@ -2,10 +2,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as FileSystem from "expo-file-system/legacy";
 import { initSounds, playSound } from "@/utils/SoundManager";
 import { readID3Tags } from "@/utils/ID3Parser";
-import { convertWma, isWma, preConvertWmaFiles } from "@/utils/WmaConverter";
 import { VolumeAnalyzer } from "@/utils/VolumeAnalyzer";
-import { updateAutoState } from "@/utils/TrackCache";
-import { getSilentPlaceholderUri } from "@/utils/SilentPlaceholder";
 import React, {
   createContext,
   useCallback,
@@ -14,16 +11,64 @@ import React, {
   useRef,
   useState,
 } from "react";
-import { AppState, AppStateStatus, BackHandler, Image } from "react-native";
-import TrackPlayer, {
-  AppKilledPlaybackBehavior,
-  Capability,
-  Event,
-  State,
-  useActiveTrack,
-  usePlaybackState,
-  useProgress,
-} from "react-native-track-player";
+import { AppState, AppStateStatus, BackHandler, DeviceEventEmitter, Image, NativeModules } from "react-native";
+
+const TrackCache = NativeModules.TrackCache as {
+  update(title: string, artist: string, queueJson: string): void;
+} | undefined;
+
+const CarModeModule = NativeModules.CarModeModule as {
+  startListening(): void;
+  stopListening(): void;
+  isInCarMode(): Promise<boolean>;
+} | undefined;
+
+const NasoSanPlayer = NativeModules.NasoSanPlayer as {
+  setup(options: object): Promise<void>;
+  updateOptions(options: object): Promise<void>;
+  reset(): Promise<void>;
+  add(tracks: object[]): Promise<void>;
+  play(): Promise<void>;
+  pause(): Promise<void>;
+  stop(): Promise<void>;
+  skip(index: number): Promise<void>;
+  skipToNext(): Promise<void>;
+  shutdown(): Promise<void>;
+  seekTo(seconds: number): Promise<void>;
+  getPosition(): Promise<number>;
+  getDuration(): Promise<number>;
+  getQueue(): Promise<object[]>;
+  updateMetadataForTrack(index: number, metadata: { title: string; artist: string }): Promise<void>;
+  getPlaybackState(): Promise<string>;
+};
+
+function useNasoSanProgress(intervalMs = 500) {
+  const [progress, setProgress] = useState({ position: 0, duration: 0 });
+  useEffect(() => {
+    const id = setInterval(async () => {
+      try {
+        const [pos, dur] = await Promise.all([
+          NasoSanPlayer.getPosition(),
+          NasoSanPlayer.getDuration(),
+        ]);
+        setProgress({ position: pos, duration: dur });
+      } catch {}
+    }, intervalMs);
+    return () => clearInterval(id);
+  }, [intervalMs]);
+  return progress;
+}
+
+function useNasoSanPlaybackState() {
+  const [state, setState] = useState<string | undefined>(undefined);
+  useEffect(() => {
+    const sub = DeviceEventEmitter.addListener("nasosan-playback-state", (data: { state: string }) => {
+      setState(data.state);
+    });
+    return () => sub.remove();
+  }, []);
+  return { state };
+}
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const SAF = (FileSystem as any).StorageAccessFramework as {
@@ -31,7 +76,7 @@ const SAF = (FileSystem as any).StorageAccessFramework as {
   readDirectoryAsync: (uri: string) => Promise<string[]>;
 };
 
-const AUDIO_EXTS = /\.(mp3|flac|ogg|aac|m4a|wav|opus|wma)$/i;
+const AUDIO_EXTS = /\.(mp3|flac|ogg|aac|m4a|mp4|wav|opus|wma|3gp|amr|mid|midi)$/i;
 
 const NASOSAN_ARTWORK = require("../assets/images/nasosan_logo_full.png");
 const NASOSAN_ARTWORK_URI: string = Image.resolveAssetSource(NASOSAN_ARTWORK).uri;
@@ -52,19 +97,9 @@ interface FolderData {
   shuffleOrder: number[];
   currentTrackId: number | null;
   trackEdits?: Record<string, { title: string; artist: string }>;
-}
-
-interface BackupFolder extends FolderData {
-  folderName: string;
-  folderUri: string;
-}
-
-interface BackupFile {
-  version: number;
-  exportDate: string;
-  settings: { shuffleMode: boolean; favoritesMode: boolean };
-  folders: BackupFolder[];
-  gains?: Record<string, Record<string, number>>;
+  gains?: Record<string, number>;
+  shuffleMode?: boolean;
+  favoritesMode?: boolean;
 }
 
 interface PlayerContextType {
@@ -107,24 +142,18 @@ interface PlayerContextType {
   regenerateShuffle: () => void;
   toggleFavorites: () => void;
   toggleFavorite: (trackId: number) => void;
-  isWmaConverting: boolean;
   normalizeGains: () => Promise<void>;
   isNormalizing: boolean;
   normalizationActive: boolean;
+  normalizationPending: boolean;
   normalizingProgress: { current: number; total: number } | null;
   clearNormalization: () => void;
   resetNormalization: () => Promise<void>;
+  cancelNormalization: () => void;
+  resetCassetteData: () => Promise<void>;
   cancelStop: () => void;
   pauseForScreen: () => Promise<void>;
   resumeAfterScreen: () => Promise<void>;
-  exportBackup: () => Promise<string | null>;
-  importBackup: () => Promise<"success" | "invalid" | "notfound">;
-  backupFolderUri: string | null;
-  backupFolderName: string | null;
-  pickBackupFolder: () => Promise<void>;
-  clearBackupFolder: () => void;
-  autoBackupIntervalMs: number;
-  setAutoBackupIntervalMs: (ms: number) => void;
 }
 
 const PlayerContext = createContext<PlayerContextType | null>(null);
@@ -165,14 +194,48 @@ function shuffleArray<T>(arr: T[]): T[] {
   return a;
 }
 
+import { APP_NAME, DATA_FILENAME } from "@/constants/app";
+const FOLDER_DATA_FILENAME = DATA_FILENAME;
+
+async function findFolderDataUri(folderUri: string): Promise<string | null> {
+  try {
+    const files = await SAF.readDirectoryAsync(folderUri);
+    return files.find((f: string) => decodeURIComponent(f).endsWith(FOLDER_DATA_FILENAME)) ?? null;
+  } catch { return null; }
+}
+
+async function readFolderFile(folderUri: string): Promise<FolderData | null> {
+  const fileUri = await findFolderDataUri(folderUri);
+  if (!fileUri) return null;
+  try {
+    const raw = await (FileSystem as any).readAsStringAsync(fileUri);
+    return JSON.parse(raw) as FolderData;
+  } catch { return null; }
+}
+
+async function writeFolderFile(folderUri: string, data: FolderData): Promise<void> {
+  try {
+    const content = JSON.stringify(data);
+    const existingUri = await findFolderDataUri(folderUri);
+    if (existingUri) {
+      await (FileSystem as any).writeAsStringAsync(existingUri, content);
+    } else {
+      const newUri = await (FileSystem as any).StorageAccessFramework.createFileAsync(
+        folderUri, FOLDER_DATA_FILENAME, "application/json"
+      );
+      await (FileSystem as any).writeAsStringAsync(newUri, content);
+    }
+  } catch {}
+}
+
 const STORAGE_KEY_FOLDER = "@nasosan_folder";
-const STORAGE_KEY_BACKUP_FOLDER = "@nasosan_backup_folder";
 const STORAGE_KEY_DATA = (folderUri: string) =>
   `@nasosan_data_${encodeURIComponent(folderUri)}`;
 const STORAGE_KEY_GAINS = (folderUri: string) =>
   `@nasosan_gains_${encodeURIComponent(folderUri)}`;
 const STORAGE_KEY_RMS = (folderUri: string) =>
   `@nasosan_rms_${encodeURIComponent(folderUri)}`;
+// Mantenuto solo per lettura (migrazione da versioni precedenti)
 const STORAGE_KEY_SETTINGS = "@nasosan_settings";
 
 let rtpReady = false;
@@ -180,58 +243,16 @@ let rtpReady = false;
 export async function ensureRtpSetup() {
   if (rtpReady) return;
   try {
-    await TrackPlayer.setupPlayer({
-      minBuffer: 3,
-      maxBuffer: 10,
-      playBuffer: 1,
-      backBuffer: 2,
-      waitForBuffer: true,
-      autoHandleInterruptions: true,
-    });
-    await TrackPlayer.updateOptions({
-      capabilities: [
-        Capability.Play,
-        Capability.Pause,
-        Capability.Stop,
-        Capability.SkipToNext,
-        Capability.SkipToPrevious,
-        Capability.SeekTo,
-        Capability.JumpForward,
-        Capability.JumpBackward,
-      ],
-      compactCapabilities: [
-        Capability.Play,
-        Capability.Pause,
-        Capability.SkipToNext,
-        Capability.SkipToPrevious,
-      ],
-      notificationCapabilities: [
-        Capability.Play,
-        Capability.Pause,
-        Capability.SkipToNext,
-        Capability.SkipToPrevious,
-        Capability.Stop,
-      ],
-      android: {
-        appKilledPlaybackBehavior:
-          AppKilledPlaybackBehavior.StopPlaybackAndRemoveNotification,
-      },
-      progressUpdateEventInterval: 500,
-    });
+    await NasoSanPlayer.setup({});
     rtpReady = true;
-  } catch (e) {
-    // setupPlayer may throw if already set up — treat as ready
-    rtpReady = true;
+  } catch {
+    // Non impostare rtpReady=true su fallimento — consente retry
   }
 }
 
 export function PlayerProvider({ children }: { children: React.ReactNode }) {
   const [folderUri, setFolderUri] = useState<string | null>(null);
   const [folderName, setFolderName] = useState<string>("NasoSan");
-  const [backupFolderUri, setBackupFolderUri] = useState<string | null>(null);
-  const [backupFolderName, setBackupFolderName] = useState<string | null>(null);
-  const backupFolderUriRef = useRef<string | null>(null);
-  const backupFolderNameRef = useRef<string | null>(null);
   const [tracks, setTracks] = useState<Track[]>([]);
   const [currentTrackId, setCurrentTrackId] = useState<number | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -240,7 +261,6 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   const [isPaused, setIsPaused] = useState(false);
   const [shuffleMode, setShuffleMode] = useState(false);
   const [favoritesMode, setFavoritesMode] = useState(false);
-  const [autoBackupIntervalMs, setAutoBackupIntervalMs] = useState(5 * 60 * 1000);
   const [shuffleOrder, setShuffleOrder] = useState<number[]>([]);
   const [playbackPositionMs, setPlaybackPositionMs] = useState(0);
   const [playbackDurationMs, setPlaybackDurationMs] = useState(0);
@@ -264,24 +284,26 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   const isPlayingRef = useRef(false);
   const isPausedRef = useRef(false);
   const playbackPositionMsRef = useRef(0);
-  const skipManualRef = useRef(false);
+
   const wasPlayingBeforeScreenRef = useRef(false);
+  const preFilterTrackIdRef = useRef<number | null>(null);
   const trackEditsRef = useRef<Record<string, { title: string; artist: string }>>({});
-  const wmaFailedRef = useRef<Set<number>>(new Set());
-  const wmaConvertingRef = useRef<Set<number>>(new Set());
-  const wmaConvertedRef = useRef<Set<number>>(new Set());
-  const wmaConvertingCountRef = useRef(0);
-  const [isWmaConverting, setIsWmaConverting] = useState(false);
   const [isNormalizing, setIsNormalizing] = useState(false);
   const [normalizationActive, setNormalizationActive] = useState(false);
+  const [normalizationPending, setNormalizationPending] = useState(false);
   const [normalizingProgress, setNormalizingProgress] = useState<{ current: number; total: number } | null>(null);
   const trackGainsRef = useRef<Map<string, number>>(new Map());
+  const cancelNormRef = useRef(false);
   const normalizeGainsRef = useRef<(() => Promise<void>) | null>(null);
+  const isNormalizingRef = useRef(false);
+  const normalizationPendingRef = useRef(false);
 
   useEffect(() => { tracksRef.current = tracks; }, [tracks]);
   useEffect(() => { currentTrackIdRef.current = currentTrackId; }, [currentTrackId]);
   useEffect(() => { shuffleModeRef.current = shuffleMode; }, [shuffleMode]);
   useEffect(() => { favoritesModeRef.current = favoritesMode; }, [favoritesMode]);
+  useEffect(() => { isNormalizingRef.current = isNormalizing; }, [isNormalizing]);
+  useEffect(() => { normalizationPendingRef.current = normalizationPending; }, [normalizationPending]);
   useEffect(() => { shuffleOrderRef.current = shuffleOrder; }, [shuffleOrder]);
   useEffect(() => { folderUriRef.current = folderUri; }, [folderUri]);
   useEffect(() => { folderNameRef.current = folderName; }, [folderName]);
@@ -289,10 +311,9 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => { isPausedRef.current = isPaused; }, [isPaused]);
   useEffect(() => { playbackPositionMsRef.current = playbackPositionMs; }, [playbackPositionMs]);
 
-  // ── RNTP hooks ──────────────────────────────────────────────────────────────
-  const rtpProgress = useProgress(500);
-  const rtpPlaybackState = usePlaybackState();
-  useActiveTrack(); // subscribed but handled via event
+  // ── Player hooks ─────────────────────────────────────────────────────────────
+  const rtpProgress = useNasoSanProgress(500);
+  const rtpPlaybackState = useNasoSanPlaybackState();
 
   useEffect(() => {
     const pos = Math.round(rtpProgress.position * 1000);
@@ -305,8 +326,8 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     const s = rtpPlaybackState.state;
     if (!s) return;
-    const playing = s === State.Playing || s === State.Buffering || s === State.Loading;
-    const paused = s === State.Paused || s === State.Ready;
+    const playing = s === "playing";
+    const paused = s === "paused";
     setIsPlaying(playing);
     isPlayingRef.current = playing;
     setIsPaused(!playing && paused);
@@ -358,110 +379,89 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     uri: string, tks: Track[], sOrder: number[], curId: number | null
   ) => {
     if (!uri) return;
-    const data: FolderData = { tracks: tks, shuffleOrder: sOrder, currentTrackId: curId, trackEdits: trackEditsRef.current };
+    const gainsObj: Record<string, number> = {};
+    trackGainsRef.current.forEach((v, k) => { gainsObj[k] = v; });
+    const data: FolderData = {
+      tracks: tks,
+      shuffleOrder: sOrder,
+      currentTrackId: curId,
+      trackEdits: trackEditsRef.current,
+      gains: Object.keys(gainsObj).length > 0 ? gainsObj : undefined,
+      shuffleMode: shuffleModeRef.current,
+      favoritesMode: favoritesModeRef.current,
+    };
     await AsyncStorage.setItem(STORAGE_KEY_DATA(uri), JSON.stringify(data));
+    writeFolderFile(uri, data).catch(() => {});
   }, []);
 
-  const autoBackupIntervalMsRef = useRef(5 * 60 * 1000);
-  useEffect(() => { autoBackupIntervalMsRef.current = autoBackupIntervalMs; }, [autoBackupIntervalMs]);
-
-  const saveSettings = useCallback(async (sMode: boolean, fMode: boolean) => {
-    await AsyncStorage.setItem(STORAGE_KEY_SETTINGS, JSON.stringify({
-      shuffleMode: sMode,
-      favoritesMode: fMode,
-      autoBackupIntervalMs: autoBackupIntervalMsRef.current,
-    }));
-  }, []);
+  const saveSettings = useCallback(async () => {
+    const uri = folderUriRef.current;
+    if (!uri) return;
+    await saveFolderData(uri, tracksRef.current, shuffleOrderRef.current, currentTrackIdRef.current);
+  }, [saveFolderData]);
 
   // ── RNTP queue sync ──────────────────────────────────────────────────────────
   const syncQueueToActiveList = useCallback(async (
     active: Track[], currentId: number | null, startPlaying = false
   ) => {
-    wmaConvertedRef.current.clear();
-    const silentUri = await getSilentPlaceholderUri();
     const rtTracks = active.map(t => ({
       id: String(t.id),
-      url: isWma(t.uri) ? silentUri : t.uri,
+      url: t.uri,
       title: t.title || t.filename,
       artist: t.artist || "NasoSan",
       artwork: NASOSAN_ARTWORK_URI,
-      album: folderNameRef.current || "NasoSan Player",
+      album: folderNameRef.current || APP_NAME,
     }));
 
-    skipManualRef.current = true;
-    await TrackPlayer.reset();
-    if (rtTracks.length === 0) { skipManualRef.current = false; return; }
-    await TrackPlayer.add(rtTracks);
+    await NasoSanPlayer.reset();
+    if (rtTracks.length === 0) { return; }
+    await NasoSanPlayer.add(rtTracks);
 
     const currentIdx = currentId != null ? active.findIndex(t => t.id === currentId) : -1;
     const startIdx = currentIdx >= 0 ? currentIdx : 0;
-    await TrackPlayer.skip(startIdx);
+    await NasoSanPlayer.skip(startIdx);
 
     const savedMs = tracksRef.current.find(t => t.id === (currentId ?? active[0]?.id))?.positionMs ?? 0;
-    if (savedMs > 0) await TrackPlayer.seekTo(savedMs / 1000);
+    if (savedMs > 0) await NasoSanPlayer.seekTo(savedMs / 1000);
 
-    skipManualRef.current = false;
+    const curTrack = rtTracks[startIdx];
+    try {
+      TrackCache?.update(
+        curTrack?.title ?? "",
+        curTrack?.artist ?? "",
+        JSON.stringify(rtTracks.map(t => ({ id: t.id, title: t.title, artist: t.artist, url: t.url })))
+      );
+    } catch {}
 
-    if (startPlaying) await TrackPlayer.play();
-    preConvertWmaFiles(active.map(t => t.uri));
+    if (startPlaying) await NasoSanPlayer.play();
   }, []);
 
-  // ── Helper WMA: converte e ricostruisce la coda con il WAV ───────────────────
-  const convertAndPlayWma = useCallback(async (
-    track: Track,
-    idxInActive: number,
-    savedMs: number,
-    shouldPlay = true,
-  ) => {
-    wmaConvertingCountRef.current++;
-    setIsWmaConverting(true);
-    try {
-      const wavUri = await convertWma(track.uri);
-      const active = getActiveList(tracksRef.current, shuffleModeRef.current, favoritesModeRef.current, shuffleOrderRef.current);
-      const silentUri = await getSilentPlaceholderUri();
-      const rtTracks = active.map(t => ({
-        id: String(t.id),
-        url: t.id === track.id ? wavUri : (isWma(t.uri) ? silentUri : t.uri),
-        title: t.title || t.filename,
-        artist: t.artist || "NasoSan",
-        artwork: NASOSAN_ARTWORK_URI,
-        album: folderNameRef.current || "NasoSan Player",
-      }));
-      skipManualRef.current = true;
-      await TrackPlayer.reset();
-      await TrackPlayer.add(rtTracks);
-      await TrackPlayer.skip(idxInActive);
-      if (savedMs > 0) await TrackPlayer.seekTo(savedMs / 1000);
-      skipManualRef.current = false;
-      if (shouldPlay) await TrackPlayer.play();
-      wmaFailedRef.current.delete(track.id);
-      wmaConvertedRef.current.add(track.id);
-    } finally {
-      wmaConvertingCountRef.current--;
-      if (wmaConvertingCountRef.current === 0) setIsWmaConverting(false);
-    }
-  }, [getActiveList]);
-
-  // ── RNTP event listeners ─────────────────────────────────────────────────────
+  // ── Car mode (Android Auto via cavo USB audio) ───────────────────────────────
   useEffect(() => {
-    const trackChangedSub = TrackPlayer.addEventListener(
-      Event.PlaybackActiveTrackChanged,
-      async ({ track }) => {
+    if (!CarModeModule) return;
+    CarModeModule.startListening();
+    const enterSub = DeviceEventEmitter.addListener("nasosan_car_enter", () => {
+      NasoSanPlayer.play().catch(() => {});
+    });
+    const exitSub = DeviceEventEmitter.addListener("nasosan_car_exit", () => {
+      NasoSanPlayer.pause().catch(() => {});
+    });
+    return () => {
+      CarModeModule?.stopListening();
+      enterSub.remove();
+      exitSub.remove();
+    };
+  }, []);
+
+  // ── Player event listeners ───────────────────────────────────────────────────
+  useEffect(() => {
+    const trackChangedSub = DeviceEventEmitter.addListener(
+      "nasosan-active-track-changed",
+      async ({ track, reason }: { track?: { id: string; title: string; artist: string }; reason: number }) => {
         if (!track) return;
         const trackId = parseInt(track.id ?? "0", 10);
         setCurrentTrackId(trackId);
         currentTrackIdRef.current = trackId;
-
-        // Aggiorna cache Android Auto
-        const autoTrack = tracksRef.current.find(t => t.id === trackId);
-        if (autoTrack) {
-          const autoActive = getActiveList(tracksRef.current, shuffleModeRef.current, favoritesModeRef.current, shuffleOrderRef.current);
-          updateAutoState(
-            autoTrack.title || autoTrack.filename,
-            autoTrack.artist || "NasoSan",
-            autoActive.map(t => ({ title: t.title || t.filename, artist: t.artist || "NasoSan" }))
-          );
-        }
 
         if (trackGainsRef.current.size > 0) {
           const gTrack = tracksRef.current.find(t => t.id === trackId);
@@ -471,36 +471,17 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
           }
         }
 
-        if (skipManualRef.current) return;
+        // reason 2=SEEK(manuale), 3=PLAYLIST_CHANGED → non ripristinare posizione
+        if (reason === 2 || reason === 3) return;
 
         const originalTrack = tracksRef.current.find(t => t.id === trackId);
         const savedMs = originalTrack?.positionMs ?? 0;
-
-        // Gestione WMA: auto-avanzamento coda → converti e ricostruisci
-        if (originalTrack && isWma(originalTrack.uri)) {
-          if (wmaFailedRef.current.has(trackId)) {
-            try { await TrackPlayer.skipToNext(); await TrackPlayer.play(); } catch {}
-            return;
-          }
-          if (wmaConvertingRef.current.has(trackId)) return;
-          const active = getActiveList(tracksRef.current, shuffleModeRef.current, favoritesModeRef.current, shuffleOrderRef.current);
-          const idx = active.findIndex(t => t.id === trackId);
-          wmaConvertingRef.current.add(trackId);
-          convertAndPlayWma(originalTrack, idx >= 0 ? idx : 0, savedMs)
-            .catch(() => {
-              wmaFailedRef.current.add(trackId);
-              TrackPlayer.skipToNext().then(() => TrackPlayer.play()).catch(() => {});
-            })
-            .finally(() => wmaConvertingRef.current.delete(trackId));
-          return;
-        }
-
-        if (savedMs > 0) await TrackPlayer.seekTo(savedMs / 1000);
+        if (savedMs > 0) await NasoSanPlayer.seekTo(savedMs / 1000);
       }
     );
 
-    const queueEndedSub = TrackPlayer.addEventListener(
-      Event.PlaybackQueueEnded,
+    const queueEndedSub = DeviceEventEmitter.addListener(
+      "nasosan-queue-ended",
       async () => {
         if (shuffleModeRef.current) {
           const ids = tracksRef.current.map(t => t.id);
@@ -536,56 +517,72 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       }
     );
 
+    const errorSub = DeviceEventEmitter.addListener(
+      "nasosan-playback-error",
+      async () => {
+        try { await NasoSanPlayer.skipToNext(); await NasoSanPlayer.play(); } catch {}
+      }
+    );
+
     return () => {
       trackChangedSub.remove();
       queueEndedSub.remove();
+      errorSub.remove();
     };
   }, [saveFolderData, getActiveList]);
 
   // ── Folder loading ────────────────────────────────────────────────────────────
   const loadFolderData = useCallback(async (
-    uri: string, freshTracks: Track[]
-  ): Promise<{ merged: Track[]; knownFilenames: Set<string>; savedEdits: Record<string, { title: string; artist: string }> }> => {
-    const raw = await AsyncStorage.getItem(STORAGE_KEY_DATA(uri));
+    uri: string, freshTracks: Track[], preloaded?: FolderData | null
+  ): Promise<{ merged: Track[]; knownFilenames: Set<string>; savedEdits: Record<string, { title: string; artist: string }>; shuffleMode?: boolean; favoritesMode?: boolean }> => {
     const knownFilenames = new Set<string>();
-    if (!raw) return { merged: freshTracks, knownFilenames, savedEdits: {} };
-    try {
-      const data: FolderData = JSON.parse(raw);
-      const merged = freshTracks.map(t => {
-        const saved = data.tracks.find(s => s.filename === t.filename);
-        if (saved) {
-          knownFilenames.add(t.filename);
-          return {
-            ...t,
-            positionMs: saved.positionMs,
-            favorite: saved.favorite,
-            title: saved.title || t.title,
-            artist: saved.artist || t.artist,
-          };
-        }
-        return t;
-      });
-      return { merged, knownFilenames, savedEdits: data.trackEdits ?? {} };
-    } catch { return { merged: freshTracks, knownFilenames, savedEdits: {} }; }
+    let data: FolderData | null = preloaded ?? null;
+    if (!data) {
+      const raw = await AsyncStorage.getItem(STORAGE_KEY_DATA(uri));
+      if (raw) { try { data = JSON.parse(raw); } catch {} }
+    }
+    if (!data) return { merged: freshTracks, knownFilenames, savedEdits: {} };
+    const merged = freshTracks.map(t => {
+      const saved = data!.tracks.find(s => s.filename === t.filename);
+      if (saved) {
+        knownFilenames.add(t.filename);
+        return {
+          ...t,
+          positionMs: saved.positionMs,
+          favorite: saved.favorite,
+          title: saved.title || t.title,
+          artist: saved.artist || t.artist,
+        };
+      }
+      return t;
+    });
+    return {
+      merged,
+      knownFilenames,
+      savedEdits: data.trackEdits ?? {},
+      shuffleMode: data.shuffleMode,
+      favoritesMode: data.favoritesMode,
+    };
   }, []);
 
-  const loadSavedShuffleOrder = useCallback(async (uri: string, freshIds: number[]): Promise<number[]> => {
-    const raw = await AsyncStorage.getItem(STORAGE_KEY_DATA(uri));
-    if (!raw) return [];
-    try {
-      const data: FolderData = JSON.parse(raw);
-      const valid = data.shuffleOrder.filter(id => freshIds.includes(id));
-      return valid.length === freshIds.length ? valid : [];
-    } catch { return []; }
+  const loadSavedShuffleOrder = useCallback(async (uri: string, freshIds: number[], preloaded?: FolderData | null): Promise<number[]> => {
+    let data: FolderData | null = preloaded ?? null;
+    if (!data) {
+      const raw = await AsyncStorage.getItem(STORAGE_KEY_DATA(uri));
+      if (raw) { try { data = JSON.parse(raw); } catch {} }
+    }
+    if (!data?.shuffleOrder) return [];
+    const valid = data.shuffleOrder.filter(id => freshIds.includes(id));
+    return valid.length === freshIds.length ? valid : [];
   }, []);
 
-  const loadSavedCurrentTrack = useCallback(async (uri: string): Promise<number | null> => {
-    const raw = await AsyncStorage.getItem(STORAGE_KEY_DATA(uri));
-    if (!raw) return null;
-    try {
-      const data: FolderData = JSON.parse(raw);
-      return data.currentTrackId;
-    } catch { return null; }
+  const loadSavedCurrentTrack = useCallback(async (uri: string, preloaded?: FolderData | null): Promise<number | null> => {
+    let data: FolderData | null = preloaded ?? null;
+    if (!data) {
+      const raw = await AsyncStorage.getItem(STORAGE_KEY_DATA(uri));
+      if (raw) { try { data = JSON.parse(raw); } catch {} }
+    }
+    return data?.currentTrackId ?? null;
   }, []);
 
   const scanGenRef = useRef(0);
@@ -593,6 +590,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   const scanFolder = useCallback(async (uri: string, autoPlay = false) => {
     const gen = ++scanGenRef.current;
     try {
+      const savedFolderFile = await readFolderFile(uri).catch(() => null);
       const files = await SAF.readDirectoryAsync(uri);
       const audioFiles: string[] = files.filter((f: string) => AUDIO_EXTS.test(decodeURIComponent(f)));
       audioFiles.sort();
@@ -604,9 +602,9 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
 
       if (gen !== scanGenRef.current) return;
 
-      const { merged: mergedTracks, knownFilenames, savedEdits } = await loadFolderData(uri, freshTracks);
-      const savedShuffle = await loadSavedShuffleOrder(uri, mergedTracks.map(t => t.id));
-      const savedCurrent = await loadSavedCurrentTrack(uri);
+      const { merged: mergedTracks, knownFilenames, savedEdits, shuffleMode: savedShuffleMode, favoritesMode: savedFavoritesMode } = await loadFolderData(uri, freshTracks, savedFolderFile);
+      const savedShuffle = await loadSavedShuffleOrder(uri, mergedTracks.map(t => t.id), savedFolderFile);
+      const savedCurrent = await loadSavedCurrentTrack(uri, savedFolderFile);
 
       if (gen !== scanGenRef.current) return;
 
@@ -614,6 +612,16 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       tracksRef.current = mergedTracks;
       setTrackEdits(savedEdits);
       trackEditsRef.current = savedEdits;
+
+      // Ripristina shuffle/fav dalla cassetta (sovrascrive i default)
+      if (savedShuffleMode !== undefined) {
+        setShuffleMode(savedShuffleMode);
+        shuffleModeRef.current = savedShuffleMode;
+      }
+      if (savedFavoritesMode !== undefined) {
+        setFavoritesMode(savedFavoritesMode);
+        favoritesModeRef.current = savedFavoritesMode;
+      }
 
       let resolvedOrder: number[] = [];
       if (savedShuffle.length > 0) {
@@ -628,11 +636,6 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         setCurrentTrackId(currentId);
         currentTrackIdRef.current = currentId;
       }
-
-      // Nuova cassetta → reset cache WMA falliti/in corso/convertiti
-      wmaFailedRef.current.clear();
-      wmaConvertingRef.current.clear();
-      wmaConvertedRef.current.clear();
 
       const active = getActiveList(mergedTracks, shuffleModeRef.current, favoritesModeRef.current, resolvedOrder);
       await syncQueueToActiveList(active, currentId, autoPlay);
@@ -671,14 +674,6 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         }
       } catch {}
 
-      // Aggiorna cache Android Auto con elenco cassetta
-      const curId2 = currentId;
-      const curTkAuto = mergedTracks.find(t => t.id === curId2);
-      updateAutoState(
-        curTkAuto?.title || curTkAuto?.filename || "",
-        curTkAuto?.artist || "NasoSan",
-        mergedTracks.map(t => ({ title: t.title || t.filename, artist: t.artist || "NasoSan" }))
-      );
     } catch (e) {
       console.error("Error scanning folder:", e);
     }
@@ -690,6 +685,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       await ensureRtpSetup();
       await initSounds();
 
+      // Migrazione: legge settings da storage precedente (sovrascritta da folder JSON in scanFolder)
       const savedSettings = await AsyncStorage.getItem(STORAGE_KEY_SETTINGS);
       if (savedSettings) {
         try {
@@ -698,19 +694,6 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
           setFavoritesMode(!!s.favoritesMode);
           shuffleModeRef.current = !!s.shuffleMode;
           favoritesModeRef.current = !!s.favoritesMode;
-          if (typeof s.autoBackupIntervalMs === "number") {
-            setAutoBackupIntervalMs(s.autoBackupIntervalMs);
-          }
-        } catch {}
-      }
-      const savedBackupFolder = await AsyncStorage.getItem(STORAGE_KEY_BACKUP_FOLDER);
-      if (savedBackupFolder) {
-        try {
-          const { uri, name } = JSON.parse(savedBackupFolder);
-          setBackupFolderUri(uri);
-          setBackupFolderName(name);
-          backupFolderUriRef.current = uri;
-          backupFolderNameRef.current = name;
         } catch {}
       }
 
@@ -728,70 +711,11 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     })();
 
     return () => {
-      TrackPlayer.reset().catch(() => {});
+      NasoSanPlayer.reset().catch(() => {});
     };
   }, []);
 
-  // ── Backup helpers (devono stare PRIMA dell'AppState useEffect) ──────────────
-  const buildBackupJson = useCallback(async (): Promise<string> => {
-    const allKeys = await AsyncStorage.getAllKeys();
-    const nasosanKeys = allKeys.filter(
-      (k) => k.startsWith("@nasosan_data_") || k === STORAGE_KEY_SETTINGS
-    );
-    const pairs = await AsyncStorage.multiGet(nasosanKeys);
-
-    const folders: BackupFolder[] = [];
-    let settings = { shuffleMode: false, favoritesMode: false };
-
-    for (const [key, value] of pairs) {
-      if (!value) continue;
-      if (key === STORAGE_KEY_SETTINGS) {
-        try { settings = JSON.parse(value); } catch {}
-      } else {
-        const encoded = key.replace("@nasosan_data_", "");
-        const uri = decodeURIComponent(encoded);
-        try {
-          const data: FolderData = JSON.parse(value);
-          folders.push({ folderName: getFolderName(uri), folderUri: uri, ...data });
-        } catch {}
-      }
-    }
-
-    const gainsKeys = allKeys.filter(k => k.startsWith("@nasosan_gains_"));
-    const gainsPairs = await AsyncStorage.multiGet(gainsKeys);
-    const gainsMap: Record<string, Record<string, number>> = {};
-    for (const [key, value] of gainsPairs) {
-      if (!value) continue;
-      const uri = decodeURIComponent(key.replace("@nasosan_gains_", ""));
-      try { gainsMap[uri] = JSON.parse(value); } catch {}
-    }
-
-    const backup: BackupFile = {
-      version: 1,
-      exportDate: new Date().toISOString(),
-      settings,
-      folders,
-      gains: Object.keys(gainsMap).length > 0 ? gainsMap : undefined,
-    };
-    return JSON.stringify(backup, null, 2);
-  }, []);
-
-  const silentBackup = useCallback(async () => {
-    // SAF e percorsi assoluti non sono accessibili in background su Android 10+.
-    // Il backup automatico usa sempre la cache interna dell'app (sempre scrivibile).
-    try {
-      const json = await buildBackupJson();
-      const fs = FileSystem as unknown as {
-        cacheDirectory: string;
-        writeAsStringAsync: (uri: string, content: string, opts?: object) => Promise<void>;
-        EncodingType: { UTF8: string };
-      };
-      const cacheUri = `${fs.cacheDirectory}NasoSanPlayer_Backup.json`;
-      await fs.writeAsStringAsync(cacheUri, json, { encoding: fs.EncodingType.UTF8 });
-    } catch {}
-  }, [buildBackupJson]);
-
-  // ── AppState (background persistence + auto-backup) ──────────────────────────
+  // ── AppState (background persistence + sync stato riproduzione) ──────────────
   useEffect(() => {
     const sub = AppState.addEventListener("change", async (state: AppStateStatus) => {
       if (state === "background" || state === "inactive") {
@@ -800,54 +724,75 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         if (uri) {
           await saveFolderData(uri, tracksRef.current, shuffleOrderRef.current, currentTrackIdRef.current);
         }
-      }
-      if (state === "background") {
-        await silentBackup();
+        if (isNormalizingRef.current && !isPlayingRef.current) {
+          cancelNormRef.current = true;
+          VolumeAnalyzer.cancelAnalysis();
+        }
       }
       if (state === "active") {
+        rtpReady = false;
+        ensureRtpSetup().catch(() => {});
+        // Sincronizza stato riproduzione dopo background (Android Auto, volante, ecc.)
+        try {
+          const s = await NasoSanPlayer.getPlaybackState();
+          const playing = s === "playing";
+          const paused = s === "paused";
+          setIsPlaying(playing);
+          isPlayingRef.current = playing;
+          setIsPaused(paused);
+          isPausedRef.current = paused;
+        } catch {}
+        const activeUri = folderUriRef.current;
+        if (activeUri) {
+          try {
+            const files = await SAF.readDirectoryAsync(activeUri);
+            const audioFiles = files
+              .filter((f: string) => AUDIO_EXTS.test(decodeURIComponent(f)))
+              .sort();
+            const currentFilenames = tracksRef.current.map(t => t.filename).sort().join(",");
+            const newFilenames = audioFiles.map((f: string) => extractFilename(f)).sort().join(",");
+            if (newFilenames !== currentFilenames) {
+              await scanFolder(activeUri, isPlayingRef.current);
+            }
+          } catch {}
+        }
+        if (normalizationPendingRef.current && !isNormalizingRef.current) {
+          setTimeout(() => { normalizeGainsRef.current?.(); }, 1500);
+        }
+        if (trackGainsRef.current.size > 0) {
+          const curTk = tracksRef.current.find(t => t.id === currentTrackIdRef.current);
+          if (curTk) {
+            const gain = trackGainsRef.current.get(curTk.uri) ?? 0;
+            setTimeout(() => { VolumeAnalyzer.applyGain(gain).catch(() => {}); }, 1500);
+          }
+        }
         if (stopEndTimeRef.current !== null) {
           const remaining = Math.max(0, Math.ceil((stopEndTimeRef.current - Date.now()) / 1000));
           setStopCountdown(remaining);
           if (remaining <= 0) {
             if (countdownRef.current) { clearInterval(countdownRef.current); countdownRef.current = null; }
             stopEndTimeRef.current = null;
+            await NasoSanPlayer.shutdown().catch(() => {});
             BackHandler.exitApp();
           }
         } else {
-          // Nessun countdown attivo: azzera il valore residuo (stale) se presente
           setStopCountdown(null);
         }
       }
     });
     return () => sub.remove();
-  }, [saveCurrentPosition, saveFolderData, silentBackup]);
-
-  // ── Salva autoBackupIntervalMs nelle impostazioni quando cambia ───────────────
-  useEffect(() => {
-    AsyncStorage.getItem(STORAGE_KEY_SETTINGS).then(raw => {
-      try {
-        const s = raw ? JSON.parse(raw) : {};
-        AsyncStorage.setItem(STORAGE_KEY_SETTINGS, JSON.stringify({ ...s, autoBackupIntervalMs }));
-      } catch {}
-    });
-  }, [autoBackupIntervalMs]);
-
-  // ── Backup periodico (intervallo configurabile) ───────────────────────────────
-  useEffect(() => {
-    if (autoBackupIntervalMs <= 0) return;
-    const id = setInterval(() => { silentBackup(); }, autoBackupIntervalMs);
-    return () => clearInterval(id);
-  }, [silentBackup, autoBackupIntervalMs]);
+  }, [saveCurrentPosition, saveFolderData, scanFolder]);
 
   const normalizeGains = useCallback(async () => {
     if (!VolumeAnalyzer.isSupported || isNormalizing) return;
     const uri = folderUriRef.current;
     const tks = tracksRef.current;
     if (!uri || tks.length === 0) return;
+    cancelNormRef.current = false;
+    setNormalizationPending(false);
     setIsNormalizing(true);
     setNormalizingProgress({ current: 0, total: tks.length });
     try {
-      // Carica RMS già calcolati (ripresa dopo chiusura/cambio cassetta)
       let rmsStored: Record<string, number> = {};
       try {
         const rmsRaw = await AsyncStorage.getItem(STORAGE_KEY_RMS(uri));
@@ -855,57 +800,105 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       } catch {}
       const rmsValues: Record<string, number> = { ...rmsStored };
       for (let i = 0; i < tks.length; i++) {
+        if (cancelNormRef.current) break;
         const t = tks[i];
         setNormalizingProgress({ current: i + 1, total: tks.length });
-        if (rmsValues[t.filename] !== undefined) continue; // già calcolato
+        await new Promise(r => setTimeout(r, 0));
+        if (rmsValues[t.filename] !== undefined) continue;
         const rms = await VolumeAnalyzer.analyzeRMS(t.uri).catch(() => -40 as number);
         rmsValues[t.filename] = rms;
         await AsyncStorage.setItem(STORAGE_KEY_RMS(uri), JSON.stringify(rmsValues)).catch(() => {});
       }
-      const rmsArr = tks.map(t => rmsValues[t.filename] ?? -40);
-      const maxRms = Math.max(...rmsArr);
-      const gainsMap = new Map<string, number>();
-      tks.forEach((t, i) => { gainsMap.set(t.uri, Math.max(0, maxRms - rmsArr[i])); });
-      trackGainsRef.current = gainsMap;
-      setNormalizationActive(true);
-      const gainsObj: Record<string, number> = {};
-      gainsMap.forEach((v, k) => { gainsObj[k] = v; });
-      await AsyncStorage.setItem(STORAGE_KEY_GAINS(uri), JSON.stringify(gainsObj));
-      const curTk = tracksRef.current.find(t => t.id === currentTrackIdRef.current);
-      if (curTk) {
-        const gain = gainsMap.get(curTk.uri) ?? 0;
-        await VolumeAnalyzer.applyGain(gain);
+      if (!cancelNormRef.current) {
+        const rmsArr = tks.map(t => rmsValues[t.filename] ?? -40);
+        const maxRms = Math.max(...rmsArr);
+        const gainsMap = new Map<string, number>();
+        tks.forEach((t, i) => { gainsMap.set(t.uri, Math.max(0, maxRms - rmsArr[i])); });
+        trackGainsRef.current = gainsMap;
+        setNormalizationActive(true);
+        const gainsObj: Record<string, number> = {};
+        gainsMap.forEach((v, k) => { gainsObj[k] = v; });
+        await AsyncStorage.setItem(STORAGE_KEY_GAINS(uri), JSON.stringify(gainsObj));
+        writeFolderFile(uri, {
+          tracks: tracksRef.current,
+          shuffleOrder: shuffleOrderRef.current,
+          currentTrackId: currentTrackIdRef.current,
+          trackEdits: trackEditsRef.current,
+          gains: gainsObj,
+          shuffleMode: shuffleModeRef.current,
+          favoritesMode: favoritesModeRef.current,
+        }).catch(() => {});
+        const curTk = tracksRef.current.find(t => t.id === currentTrackIdRef.current);
+        if (curTk) {
+          const gain = gainsMap.get(curTk.uri) ?? 0;
+          await VolumeAnalyzer.applyGain(gain);
+        }
       }
     } finally {
       setIsNormalizing(false);
       setNormalizingProgress(null);
+      if (cancelNormRef.current) {
+        const missing = trackGainsRef.current.size === 0 ||
+          tracksRef.current.some(t => !trackGainsRef.current.has(t.uri));
+        if (missing) setNormalizationPending(true);
+      }
     }
   }, [isNormalizing]);
 
-  // Sincronizza ref per uso da scanFolder (evita circular deps)
   useEffect(() => { normalizeGainsRef.current = normalizeGains; }, [normalizeGains]);
 
-  // clearNormalization: solo disattiva, mantiene dati su storage (toggle OFF)
   const clearNormalization = useCallback(async () => {
     trackGainsRef.current = new Map();
     setNormalizationActive(false);
+    setNormalizationPending(false);
     await VolumeAnalyzer.applyGain(0).catch(() => {});
   }, []);
 
-  // resetNormalization: cancella tutto e riparte da zero (long press 3s)
   const resetNormalization = useCallback(async () => {
-    if (isNormalizing) return;
+    cancelNormRef.current = true;
+    VolumeAnalyzer.cancelAnalysis();
     const uri = folderUriRef.current;
     trackGainsRef.current = new Map();
     setNormalizationActive(false);
+    setNormalizationPending(false);
     setNormalizingProgress(null);
     await VolumeAnalyzer.applyGain(0).catch(() => {});
     if (uri) {
       await AsyncStorage.removeItem(STORAGE_KEY_GAINS(uri)).catch(() => {});
       await AsyncStorage.removeItem(STORAGE_KEY_RMS(uri)).catch(() => {});
+      const folderFile = await readFolderFile(uri).catch(() => null);
+      if (folderFile) {
+        writeFolderFile(uri, { ...folderFile, gains: undefined }).catch(() => {});
+      }
     }
-    normalizeGainsRef.current?.();
-  }, [isNormalizing]);
+  }, []);
+
+  const cancelNormalization = useCallback(() => {
+    cancelNormRef.current = true;
+    VolumeAnalyzer.cancelAnalysis();
+  }, []);
+
+  const resetCassetteData = useCallback(async () => {
+    const uri = folderUriRef.current;
+    if (!uri) return;
+    const fileUri = await findFolderDataUri(uri).catch(() => null);
+    if (fileUri) {
+      await (FileSystem as any).deleteAsync(fileUri, { idempotent: true }).catch(() => {});
+    }
+    await AsyncStorage.multiRemove([
+      STORAGE_KEY_DATA(uri),
+      STORAGE_KEY_GAINS(uri),
+      STORAGE_KEY_RMS(uri),
+    ]).catch(() => {});
+    trackEditsRef.current = {};
+    setTrackEdits({});
+    trackGainsRef.current = new Map();
+    setNormalizationActive(false);
+    setNormalizationPending(false);
+    normalizationPendingRef.current = false;
+    setNormalizingProgress(null);
+    await scanFolder(uri);
+  }, [scanFolder]);
 
   useEffect(() => {
     if (!folderUri) {
@@ -916,16 +909,29 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     }
     (async () => {
       try {
-        const rawGains = await AsyncStorage.getItem(STORAGE_KEY_GAINS(folderUri));
-        if (rawGains) {
-          const obj = JSON.parse(rawGains) as Record<string, number>;
-          trackGainsRef.current = new Map(Object.entries(obj));
+        let gainsObj: Record<string, number> | null = null;
+        const folderFile = await readFolderFile(folderUri).catch(() => null);
+        if (folderFile?.gains && Object.keys(folderFile.gains).length > 0) {
+          gainsObj = folderFile.gains;
+        } else {
+          const rawGains = await AsyncStorage.getItem(STORAGE_KEY_GAINS(folderUri));
+          if (rawGains) gainsObj = JSON.parse(rawGains) as Record<string, number>;
+        }
+        if (gainsObj) {
+          trackGainsRef.current = new Map(Object.entries(gainsObj));
           setNormalizationActive(true);
+          setTimeout(() => {
+            const curTk = tracksRef.current.find(t => t.id === currentTrackIdRef.current);
+            if (curTk) {
+              const gain = trackGainsRef.current.get(curTk.uri) ?? 0;
+              VolumeAnalyzer.applyGain(gain).catch(() => {});
+            }
+          }, 2000);
         } else {
           trackGainsRef.current = new Map();
           setNormalizationActive(false);
         }
-      } catch { /* ignore */ }
+      } catch {}
     })();
   }, [folderUri]);
 
@@ -937,9 +943,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       const uri = perms.directoryUri;
       const name = getFolderName(uri);
 
-      skipManualRef.current = true;
-      await TrackPlayer.reset();
-      skipManualRef.current = false;
+      await NasoSanPlayer.reset();
 
       playSound("eject");
       setTimeout(() => playSound("insert"), 600);
@@ -962,9 +966,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
 
   const clearFolder = useCallback(async () => {
     playSound("eject");
-    skipManualRef.current = true;
-    await TrackPlayer.reset().catch(() => {});
-    skipManualRef.current = false;
+    await NasoSanPlayer.reset().catch(() => {});
 
     setFolderUri(null);
     setFolderName("NasoSan");
@@ -983,35 +985,13 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     await AsyncStorage.removeItem(STORAGE_KEY_FOLDER);
   }, []);
 
-  const pickBackupFolder = useCallback(async () => {
-    try {
-      const perms = await SAF.requestDirectoryPermissionsAsync();
-      if (!perms.granted) return;
-      const uri = perms.directoryUri;
-      const name = getFolderName(uri);
-      setBackupFolderUri(uri);
-      setBackupFolderName(name);
-      backupFolderUriRef.current = uri;
-      backupFolderNameRef.current = name;
-      await AsyncStorage.setItem(STORAGE_KEY_BACKUP_FOLDER, JSON.stringify({ uri, name }));
-    } catch (e) {
-      console.error("Error picking backup folder:", e);
-    }
-  }, []);
-
-  const clearBackupFolder = useCallback(async () => {
-    setBackupFolderUri(null);
-    setBackupFolderName(null);
-    backupFolderUriRef.current = null;
-    backupFolderNameRef.current = null;
-    await AsyncStorage.removeItem(STORAGE_KEY_BACKUP_FOLDER);
-  }, []);
-
   // ── Playback controls ─────────────────────────────────────────────────────────
   const play = useCallback(async () => {
     if (countdownRef.current) { clearInterval(countdownRef.current); countdownRef.current = null; }
     stopEndTimeRef.current = null;
     setStopCountdown(null);
+
+    await ensureRtpSetup();
 
     const tks = tracksRef.current;
     if (!tks.length) return;
@@ -1020,79 +1000,56 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     const active = getActiveList(tks, shuffleModeRef.current, favoritesModeRef.current, shuffleOrderRef.current);
     if (!active.length) return;
 
-    const startIdx = curId != null ? active.findIndex(t => t.id === curId) : 0;
-    const realIdx = startIdx >= 0 ? startIdx : 0;
-    const startTrack = tracksRef.current.find(t => t.id === active[realIdx].id) ?? active[realIdx];
-
-    // WMA: gestito prima del check coda per evitare play su URI grezzo
-    if (isWma(startTrack.uri)) {
-      // Pausa genuina: WAV confermato in coda → riprendi direttamente
-      if (isPausedRef.current && wmaConvertedRef.current.has(startTrack.id)) {
-        await TrackPlayer.play();
-        return;
-      }
-      if (!wmaConvertingRef.current.has(startTrack.id)) {
-        const savedMs = startTrack.positionMs ?? 0;
-        wmaConvertingRef.current.add(startTrack.id);
-        convertAndPlayWma(startTrack, realIdx, savedMs)
-          .catch(() => { wmaFailedRef.current.add(startTrack.id); })
-          .finally(() => wmaConvertingRef.current.delete(startTrack.id));
-      }
-      return;
-    }
-
-    // Non-WMA: flusso normale
     if (isPausedRef.current) {
-      await TrackPlayer.play();
+      await NasoSanPlayer.play();
       return;
     }
 
-    const queue = await TrackPlayer.getQueue();
+    const queue = await NasoSanPlayer.getQueue();
     if (queue.length === 0) {
       await syncQueueToActiveList(active, curId, true);
     } else {
-      await TrackPlayer.play();
+      await NasoSanPlayer.play();
     }
-  }, [getActiveList, syncQueueToActiveList, convertAndPlayWma]);
+  }, [getActiveList, syncQueueToActiveList]);
 
   const pause = useCallback(async () => {
     await saveCurrentPosition();
-    await TrackPlayer.pause();
+    await NasoSanPlayer.pause();
   }, [saveCurrentPosition]);
 
   const stop = useCallback(async () => {
-    // Secondo stop mentre il countdown è già attivo → chiudi subito (conferma uscita)
     if (stopEndTimeRef.current !== null) {
       if (countdownRef.current) { clearInterval(countdownRef.current); countdownRef.current = null; }
       stopEndTimeRef.current = null;
-      silentBackup().catch(() => {});
+      await NasoSanPlayer.shutdown().catch(() => {});
       BackHandler.exitApp();
       return;
     }
     await saveCurrentPosition();
-    await TrackPlayer.pause();
+    await NasoSanPlayer.pause();
     const uri = folderUriRef.current;
     if (uri) {
       await saveFolderData(uri, tracksRef.current, shuffleOrderRef.current, currentTrackIdRef.current);
     }
     setIsPlaying(false);
     setIsPaused(false);
-    const STOP_SECS = 30;
+    const STOP_SECS = 7;
     stopEndTimeRef.current = Date.now() + STOP_SECS * 1000;
     setStopCountdown(STOP_SECS);
     if (countdownRef.current) clearInterval(countdownRef.current);
-    countdownRef.current = setInterval(() => {
+    countdownRef.current = setInterval(async () => {
       const remaining = Math.max(0, Math.ceil((stopEndTimeRef.current! - Date.now()) / 1000));
       setStopCountdown(remaining);
       if (remaining <= 0) {
         clearInterval(countdownRef.current!);
         countdownRef.current = null;
         stopEndTimeRef.current = null;
-        silentBackup().catch(() => {});
+        await NasoSanPlayer.shutdown().catch(() => {});
         BackHandler.exitApp();
       }
     }, 500);
-  }, [saveCurrentPosition, saveFolderData, silentBackup]);
+  }, [saveCurrentPosition, saveFolderData]);
 
   const editTrackMeta = useCallback(async (id: number, title: string, artist: string) => {
     const newEdits = { ...trackEditsRef.current, [String(id)]: { title, artist } };
@@ -1105,7 +1062,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     const active = getActiveList(tracksRef.current, shuffleModeRef.current, favoritesModeRef.current, shuffleOrderRef.current);
     const idx = active.findIndex(t => t.id === id);
     if (idx >= 0) {
-      try { await TrackPlayer.updateMetadataForTrack(idx, { title, artist }); } catch {}
+      try { await NasoSanPlayer.updateMetadataForTrack(idx, { title, artist }); } catch {}
     }
   }, [saveFolderData, getActiveList]);
 
@@ -1114,20 +1071,21 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       clearInterval(countdownRef.current);
       countdownRef.current = null;
     }
+    stopEndTimeRef.current = null;
     setStopCountdown(null);
   }, []);
 
   const pauseForScreen = useCallback(async () => {
     wasPlayingBeforeScreenRef.current = isPlayingRef.current;
     if (isPlayingRef.current) {
-      await TrackPlayer.pause();
+      await NasoSanPlayer.pause();
     }
   }, []);
 
   const resumeAfterScreen = useCallback(async () => {
     if (wasPlayingBeforeScreenRef.current) {
       wasPlayingBeforeScreenRef.current = false;
-      await TrackPlayer.play();
+      await NasoSanPlayer.play();
     }
   }, []);
 
@@ -1148,33 +1106,36 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
 
     setCurrentTrackId(active[nextIdx].id);
     currentTrackIdRef.current = active[nextIdx].id;
+    stopEndTimeRef.current = null;
     setStopCountdown(null);
     if (countdownRef.current) { clearInterval(countdownRef.current); countdownRef.current = null; }
 
-    if (isWma(nextTrack.uri)) {
-      skipManualRef.current = true;
-      await TrackPlayer.skip(nextIdx);
-      skipManualRef.current = false;
-      if (!wmaConvertingRef.current.has(nextTrack.id)) {
-        wmaConvertingRef.current.add(nextTrack.id);
-        convertAndPlayWma(nextTrack, nextIdx, savedMs)
-          .catch(() => { wmaFailedRef.current.add(nextTrack.id); })
-          .finally(() => wmaConvertingRef.current.delete(nextTrack.id));
-      }
-    } else {
-      skipManualRef.current = true;
-      await TrackPlayer.skip(nextIdx);
-      if (savedMs > 0) await TrackPlayer.seekTo(savedMs / 1000);
-      skipManualRef.current = false;
-      await TrackPlayer.play();
-    }
-  }, [getActiveList, saveCurrentPosition, saveFolderData, convertAndPlayWma]);
+    await NasoSanPlayer.skip(nextIdx);
+    if (savedMs > 0) await NasoSanPlayer.seekTo(savedMs / 1000);
+    await NasoSanPlayer.play();
+  }, [getActiveList, saveCurrentPosition, saveFolderData]);
 
   const prev = useCallback(async () => {
     const tks = tracksRef.current;
     const curId = currentTrackIdRef.current;
     const active = getActiveList(tks, shuffleModeRef.current, favoritesModeRef.current, shuffleOrderRef.current);
     if (!active.length) return;
+
+    let currentPos = 0;
+    try { currentPos = await NasoSanPlayer.getPosition(); } catch {}
+    if (currentPos > 3) {
+      await NasoSanPlayer.seekTo(0);
+      await NasoSanPlayer.play();
+      const id = curId;
+      if (id != null) {
+        setTracks(prev => {
+          const updated = prev.map(t => t.id === id ? { ...t, positionMs: 0 } : t);
+          tracksRef.current = updated;
+          return updated;
+        });
+      }
+      return;
+    }
 
     await saveCurrentPosition();
     const uri = folderUriRef.current;
@@ -1187,27 +1148,14 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
 
     setCurrentTrackId(active[prevIdx].id);
     currentTrackIdRef.current = active[prevIdx].id;
+    stopEndTimeRef.current = null;
     setStopCountdown(null);
     if (countdownRef.current) { clearInterval(countdownRef.current); countdownRef.current = null; }
 
-    if (isWma(prevTrack.uri)) {
-      skipManualRef.current = true;
-      await TrackPlayer.skip(prevIdx);
-      skipManualRef.current = false;
-      if (!wmaConvertingRef.current.has(prevTrack.id)) {
-        wmaConvertingRef.current.add(prevTrack.id);
-        convertAndPlayWma(prevTrack, prevIdx, savedMs)
-          .catch(() => { wmaFailedRef.current.add(prevTrack.id); })
-          .finally(() => wmaConvertingRef.current.delete(prevTrack.id));
-      }
-    } else {
-      skipManualRef.current = true;
-      await TrackPlayer.skip(prevIdx);
-      if (savedMs > 0) await TrackPlayer.seekTo(savedMs / 1000);
-      skipManualRef.current = false;
-      await TrackPlayer.play();
-    }
-  }, [getActiveList, saveCurrentPosition, saveFolderData, convertAndPlayWma]);
+    await NasoSanPlayer.skip(prevIdx);
+    if (savedMs > 0) await NasoSanPlayer.seekTo(savedMs / 1000);
+    await NasoSanPlayer.play();
+  }, [getActiveList, saveCurrentPosition, saveFolderData]);
 
   const seekToTrack = useCallback(async (trackId: number, autoPlay?: boolean) => {
     const tks = tracksRef.current;
@@ -1222,27 +1170,14 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
 
     setCurrentTrackId(trackId);
     currentTrackIdRef.current = trackId;
+    stopEndTimeRef.current = null;
     setStopCountdown(null);
     if (countdownRef.current) { clearInterval(countdownRef.current); countdownRef.current = null; }
 
-    if (isWma(targetTrack.uri)) {
-      skipManualRef.current = true;
-      await TrackPlayer.skip(idx);
-      skipManualRef.current = false;
-      if (!wmaConvertingRef.current.has(trackId)) {
-        wmaConvertingRef.current.add(trackId);
-        convertAndPlayWma(targetTrack, idx, savedMs, shouldPlay)
-          .catch(() => { wmaFailedRef.current.add(trackId); })
-          .finally(() => wmaConvertingRef.current.delete(trackId));
-      }
-    } else {
-      skipManualRef.current = true;
-      await TrackPlayer.skip(idx);
-      if (savedMs > 0) await TrackPlayer.seekTo(savedMs / 1000);
-      skipManualRef.current = false;
-      if (shouldPlay) await TrackPlayer.play();
-    }
-  }, [getActiveList, saveCurrentPosition, convertAndPlayWma]);
+    await NasoSanPlayer.skip(idx);
+    if (savedMs > 0) await NasoSanPlayer.seekTo(savedMs / 1000);
+    if (shouldPlay) await NasoSanPlayer.play();
+  }, [getActiveList, saveCurrentPosition]);
 
   // ── FF / RW ───────────────────────────────────────────────────────────────────
   const startFF = useCallback(() => {
@@ -1253,11 +1188,11 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     ffSpeedRef.current = 2;
     if (ffIntervalRef.current) clearInterval(ffIntervalRef.current);
     ffIntervalRef.current = setInterval(async () => {
-      const pos = await TrackPlayer.getPosition();
-      const dur = await TrackPlayer.getDuration();
-      if (!isFinite(dur)) return;
+      const pos = playbackPositionMsRef.current / 1000;
+      const dur = await NasoSanPlayer.getDuration();
+      if (!isFinite(dur) || dur <= 0) return;
       const newPos = Math.min(pos + ffSpeedRef.current, dur);
-      await TrackPlayer.seekTo(newPos);
+      await NasoSanPlayer.seekTo(newPos);
       ffSpeedRef.current = Math.min(ffSpeedRef.current + 0.5, 10);
     }, 300);
   }, []);
@@ -1276,9 +1211,9 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     rwSpeedRef.current = 2;
     if (rwIntervalRef.current) clearInterval(rwIntervalRef.current);
     rwIntervalRef.current = setInterval(async () => {
-      const pos = await TrackPlayer.getPosition();
+      const pos = playbackPositionMsRef.current / 1000;
       const newPos = Math.max(pos - rwSpeedRef.current, 0);
-      await TrackPlayer.seekTo(newPos);
+      await NasoSanPlayer.seekTo(newPos);
       rwSpeedRef.current = Math.min(rwSpeedRef.current + 0.5, 10);
     }, 300);
   }, []);
@@ -1290,29 +1225,36 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   // ── Shuffle / Favorites ───────────────────────────────────────────────────────
+  const shuffleFromCurrent = useCallback((ids: number[]): number[] => {
+    const curId = currentTrackIdRef.current;
+    const rest = ids.filter(id => id !== curId);
+    const shuffled = shuffleArray(rest);
+    return curId != null ? [curId, ...shuffled] : shuffled;
+  }, []);
+
   const toggleShuffle = useCallback(() => {
     setShuffleMode(prev => {
       const next = !prev;
       shuffleModeRef.current = next;
 
       let order = shuffleOrderRef.current;
-      if (next && order.length === 0) {
+      if (next) {
         const ids = tracksRef.current.map(t => t.id);
-        order = shuffleArray(ids);
+        order = shuffleFromCurrent(ids);
         setShuffleOrder(order);
         shuffleOrderRef.current = order;
       }
 
       const newActive = getActiveList(tracksRef.current, next, favoritesModeRef.current, order);
       syncQueueToActiveList(newActive, currentTrackIdRef.current, isPlayingRef.current);
-      saveSettings(next, favoritesModeRef.current);
+      saveSettings();
       return next;
     });
-  }, [getActiveList, syncQueueToActiveList, saveSettings]);
+  }, [getActiveList, syncQueueToActiveList, saveSettings, shuffleFromCurrent]);
 
   const regenerateShuffle = useCallback(() => {
     const ids = tracksRef.current.map(t => t.id);
-    const newOrder = shuffleArray(ids);
+    const newOrder = shuffleFromCurrent(ids);
     setShuffleOrder(newOrder);
     shuffleOrderRef.current = newOrder;
     setShuffleMode(true);
@@ -1320,8 +1262,8 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
 
     const newActive = getActiveList(tracksRef.current, true, favoritesModeRef.current, newOrder);
     syncQueueToActiveList(newActive, currentTrackIdRef.current, isPlayingRef.current);
-    saveSettings(true, favoritesModeRef.current);
-  }, [getActiveList, syncQueueToActiveList, saveSettings]);
+    saveSettings();
+  }, [getActiveList, syncQueueToActiveList, saveSettings, shuffleFromCurrent]);
 
   const toggleFavorites = useCallback(() => {
     const tks = tracksRef.current;
@@ -1335,9 +1277,18 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       const next = !prev;
       favoritesModeRef.current = next;
 
+      let targetId: number | null;
+      if (next) {
+        preFilterTrackIdRef.current = currentTrackIdRef.current;
+        targetId = currentTrackIdRef.current;
+      } else {
+        targetId = preFilterTrackIdRef.current ?? currentTrackIdRef.current;
+        preFilterTrackIdRef.current = null;
+      }
+
       const newActive = getActiveList(tks, shuffleModeRef.current, next, shuffleOrderRef.current);
-      syncQueueToActiveList(newActive, currentTrackIdRef.current, isPlayingRef.current);
-      saveSettings(shuffleModeRef.current, next);
+      syncQueueToActiveList(newActive, targetId, isPlayingRef.current);
+      saveSettings();
       return next;
     });
   }, [favoritesMode, getActiveList, syncQueueToActiveList, saveSettings]);
@@ -1347,167 +1298,10 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       const updated = prev.map(t => t.id === trackId ? { ...t, favorite: !t.favorite } : t);
       tracksRef.current = updated;
       const uri = folderUriRef.current;
-      if (uri) saveFolderData(uri, updated, shuffleOrderRef.current, currentTrackIdRef.current);
+      if (uri) saveFolderData(uri, updated, shuffleOrderRef.current, currentTrackIdRef.current).catch(() => {});
       return updated;
     });
   }, [saveFolderData]);
-
-  // ── Backup / Restore ──────────────────────────────────────────────────────────
-  const exportBackup = useCallback(async (): Promise<string | null> => {
-    try {
-      const json = await buildBackupJson();
-      const fs = FileSystem as unknown as {
-        cacheDirectory: string;
-        writeAsStringAsync: (uri: string, content: string, opts?: object) => Promise<void>;
-        deleteAsync: (uri: string, opts?: object) => Promise<void>;
-        EncodingType: { UTF8: string };
-        StorageAccessFramework: {
-          createFileAsync: (folderUri: string, fileName: string, mimeType: string) => Promise<string>;
-          readDirectoryAsync: (uri: string) => Promise<string[]>;
-        };
-      };
-      const fileName = "NasoSanPlayer_Backup.json";
-      const bkpUri = backupFolderUriRef.current;
-      if (bkpUri) {
-        try {
-          // Elimina il file esistente prima di crearne uno nuovo (evita duplicati "(1).json")
-          try {
-            const existing = await fs.StorageAccessFramework.readDirectoryAsync(bkpUri);
-            const found = existing.find((f: string) =>
-              decodeURIComponent(f).toLowerCase().includes("nasosanplayer_backup")
-            );
-            if (found) await fs.deleteAsync(found, { idempotent: true });
-          } catch {}
-          const fileUri = await fs.StorageAccessFramework.createFileAsync(
-            bkpUri, fileName, "application/json"
-          );
-          await fs.writeAsStringAsync(fileUri, json, { encoding: fs.EncodingType.UTF8 });
-          return backupFolderNameRef.current || "cartella backup";
-        } catch {}
-      }
-      try {
-        const dlPath = `file:///storage/emulated/0/Download/${fileName}`;
-        await fs.writeAsStringAsync(dlPath, json, { encoding: fs.EncodingType.UTF8 });
-        return "Download";
-      } catch {}
-      const fallbackUri = `${fs.cacheDirectory}${fileName}`;
-      await fs.writeAsStringAsync(fallbackUri, json, { encoding: fs.EncodingType.UTF8 });
-      return null;
-    } catch {
-      return null;
-    }
-  }, [buildBackupJson]);
-
-  const importBackup = useCallback(async (): Promise<"success" | "invalid" | "notfound"> => {
-    const fs = FileSystem as unknown as {
-      readAsStringAsync: (uri: string) => Promise<string>;
-    };
-    const SAFfs = (FileSystem as any).StorageAccessFramework as {
-      readDirectoryAsync: (uri: string) => Promise<string[]>;
-    };
-
-    let content: string | null = null;
-
-    // 1. Cerca nella cartella backup selezionata (SAF)
-    const bkpUri = backupFolderUriRef.current;
-    if (bkpUri) {
-      try {
-        const files = await SAFfs.readDirectoryAsync(bkpUri);
-        const found = files.find((f: string) =>
-          decodeURIComponent(f).toLowerCase().includes("nasosanplayer_backup")
-        );
-        if (found) {
-          content = await fs.readAsStringAsync(found);
-        }
-      } catch {}
-    }
-
-    // 2. Fallback: cartella Download
-    if (content === null) {
-      try {
-        content = await fs.readAsStringAsync(
-          "file:///storage/emulated/0/Download/NasoSanPlayer_Backup.json"
-        );
-      } catch {}
-    }
-
-    // 3. Fallback: cache interna (backup automatico)
-    if (content === null) {
-      try {
-        const fs2 = FileSystem as unknown as { cacheDirectory: string; readAsStringAsync: (uri: string) => Promise<string> };
-        content = await fs2.readAsStringAsync(`${fs2.cacheDirectory}NasoSanPlayer_Backup.json`);
-      } catch {}
-    }
-
-    if (content === null) return "notfound";
-
-    let backup: BackupFile;
-    try { backup = JSON.parse(content); } catch { return "invalid"; }
-    if (!backup.version || !Array.isArray(backup.folders)) return "invalid";
-
-    // Ripristina impostazioni
-    if (backup.settings) {
-      await AsyncStorage.setItem(STORAGE_KEY_SETTINGS, JSON.stringify(backup.settings));
-      const s = backup.settings;
-      setShuffleMode(!!s.shuffleMode);
-      setFavoritesMode(!!s.favoritesMode);
-      shuffleModeRef.current = !!s.shuffleMode;
-      favoritesModeRef.current = !!s.favoritesMode;
-    }
-
-    // Scrivi tutti i dati delle cartelle con chiave originale
-    // + chiave corrente se il nome cartella coincide (cross-device)
-    const items: [string, string][] = [];
-    for (const folder of backup.folders) {
-      const data: FolderData = {
-        tracks: folder.tracks,
-        shuffleOrder: folder.shuffleOrder,
-        currentTrackId: folder.currentTrackId,
-        trackEdits: folder.trackEdits,
-      };
-      const serialized = JSON.stringify(data);
-      items.push([STORAGE_KEY_DATA(folder.folderUri), serialized]);
-      if (
-        folderUriRef.current &&
-        folder.folderName === folderNameRef.current &&
-        folder.folderUri !== folderUriRef.current
-      ) {
-        items.push([STORAGE_KEY_DATA(folderUriRef.current), serialized]);
-      }
-    }
-    await AsyncStorage.multiSet(items);
-
-    // Ripristina gains
-    if (backup.gains) {
-      const gainItems: [string, string][] = [];
-      for (const [fUri, gains] of Object.entries(backup.gains)) {
-        gainItems.push([STORAGE_KEY_GAINS(fUri), JSON.stringify(gains)]);
-        const matchFolder = backup.folders.find(f => f.folderUri === fUri);
-        if (
-          folderUriRef.current &&
-          matchFolder?.folderName === folderNameRef.current &&
-          fUri !== folderUriRef.current
-        ) {
-          gainItems.push([STORAGE_KEY_GAINS(folderUriRef.current), JSON.stringify(gains)]);
-        }
-      }
-      if (gainItems.length > 0) await AsyncStorage.multiSet(gainItems);
-      if (folderUriRef.current) {
-        const rawG = await AsyncStorage.getItem(STORAGE_KEY_GAINS(folderUriRef.current));
-        if (rawG) {
-          trackGainsRef.current = new Map(Object.entries(JSON.parse(rawG) as Record<string, number>));
-          setNormalizationActive(true);
-        }
-      }
-    }
-
-    // Ricarica la cartella corrente se presente
-    if (folderUriRef.current) {
-      await scanFolder(folderUriRef.current, false);
-    }
-
-    return "success";
-  }, [scanFolder]);
 
   return (
     <PlayerContext.Provider value={{
@@ -1550,24 +1344,18 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       toggleFavorites,
       toggleFavorite,
       editTrackMeta,
-      isWmaConverting,
       normalizeGains,
       isNormalizing,
       normalizationActive,
+      normalizationPending,
       normalizingProgress,
       clearNormalization,
       resetNormalization,
+      cancelNormalization,
+      resetCassetteData,
       cancelStop,
       pauseForScreen,
       resumeAfterScreen,
-      exportBackup,
-      importBackup,
-      backupFolderUri,
-      backupFolderName,
-      pickBackupFolder,
-      clearBackupFolder,
-      autoBackupIntervalMs,
-      setAutoBackupIntervalMs,
     }}>
       {children}
     </PlayerContext.Provider>
