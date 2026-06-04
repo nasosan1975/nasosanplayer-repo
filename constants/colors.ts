@@ -1,7 +1,9 @@
+// Analyst: NasoSan | Dev: Claude AI
+// Licenza: CC BY 4.0 – nasosan.it | https://creativecommons.org/licenses/by/4.0/
+
 const colors = {
   light: {
     background: "#1e1e26",
-    foreground: "#c8c8d2",
     panels: "#2a2a36",
     dark: "#16161e",
     separators: "#3a3a4a",
@@ -14,21 +16,22 @@ const colors = {
     warning: "#ffb432",
     ok: "#64c864",
     error: "#e05555",
+    errorBg: "#2a1616",
+    normOffBorder: "#962828",
+    normActiveBg: "#102010",
+    normAnalyzingBg: "#2a2010",
+    rowActive: "#252530",
+    timeTotal: "#7a98b8",
+    labelDim: "#4a6a8a",
     cassetteBody: "#2d2d2d",
     cassetteLabelTop: "#f0f0e8",
     cassetteLabelDefault: "#c8200a",
-    tapeColor: "#1a1200",
+    tapeColor: "#1a1200", // distinto da TAPE_COLOR in CassetteSVG.tsx — divergenza voluta per design
     frame: "#444444",
-    primary: "#64c8ff",
-    primaryForeground: "#1e1e26",
-    muted: "#2a2a36",
-    mutedForeground: "#8cc8ff",
-    border: "#3a3a4a",
-    card: "#2a2a36",
-    cardForeground: "#c8c8d2",
-    tint: "#64c8ff",
+    reelWindow: "#0a0a0a",
   },
   radius: 6,
 };
 
+export const C = colors.light;
 export default colors;
