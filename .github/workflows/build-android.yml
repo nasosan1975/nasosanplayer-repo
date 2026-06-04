@@ -68,7 +68,7 @@ jobs:
           STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
         run: |
           cd android
-          ./gradlew assembleRelease \
+          ./gradlew assembleRelease --parallel \
             -Pandroid.injected.signing.store.file=app/nasosan-release.keystore \
             -Pandroid.injected.signing.store.password="$STORE_PASSWORD" \
             -Pandroid.injected.signing.key.alias="$KEY_ALIAS" \
@@ -80,7 +80,7 @@ jobs:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
         run: |
           cd android
-          ./gradlew assembleDebug
+          ./gradlew assembleDebug --parallel
 
       - name: Upload Release APK
         if: ${{ env.KEYSTORE_BASE64 != '' }}
@@ -88,7 +88,7 @@ jobs:
         with:
           name: NasoSanPlayer-release
           path: android/app/build/outputs/apk/release/*.apk
-          retention-days: 30
+          retention-days: 7
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
 
@@ -98,6 +98,6 @@ jobs:
         with:
           name: NasoSanPlayer-debug
           path: android/app/build/outputs/apk/debug/*.apk
-          retention-days: 30
+          retention-days: 7
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
