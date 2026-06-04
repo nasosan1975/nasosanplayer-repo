@@ -4,6 +4,7 @@ import { StyleSheet, Text, TouchableOpacity, View } from "react-native";
 
 import { usePlayer } from "@/context/PlayerContext";
 import { initSounds, playSound, SoundName } from "@/utils/SoundManager";
+import { C } from "@/constants/colors";
 
 interface BtnProps {
   onPress?: () => void;
@@ -34,7 +35,17 @@ function Btn({ onPress, onPressIn, onPressOut, children, green, style, sound = "
   );
 }
 
-export default function ControlButtons({ large = false }: { large?: boolean }) {
+export default function ControlButtons({
+  large = false,
+  mainOnly = false,
+  secondaryOnly = false,
+  vertical = false,
+}: {
+  large?: boolean;
+  mainOnly?: boolean;
+  secondaryOnly?: boolean;
+  vertical?: boolean;
+}) {
   const { play, pause, stop, next, prev, startFF, stopFF, startRW, stopRW, isPlaying } = usePlayer();
 
   useEffect(() => {
@@ -46,43 +57,61 @@ export default function ControlButtons({ large = false }: { large?: boolean }) {
   const bigIconPlay: object = large ? { fontSize: 32, lineHeight: 38 } : {};
   const bigPlayBtn: object = large ? { paddingHorizontal: 22, paddingVertical: 17, minWidth: 64 } : {};
 
+  const prevBtn = (
+    <Btn onPress={prev} sound="click" style={bigBtn}>
+      <Text style={[styles.icon, bigIcon]}>{"⏮"}</Text>
+    </Btn>
+  );
+  const rwBtn = (
+    <Btn onPressIn={startRW} onPressOut={stopRW} sound="ff">
+      <Text style={styles.icon}>{"⏪"}</Text>
+    </Btn>
+  );
+  const playBtn = (
+    <Btn green onPress={isPlaying ? pause : play} style={[styles.btnPlayLarge, bigPlayBtn]} sound={isPlaying ? "click" : "play"}>
+      <Text style={[styles.iconPlay, bigIconPlay]}>{isPlaying ? "⏸" : "▶"}</Text>
+    </Btn>
+  );
+  const stopBtn = (
+    <Btn onPress={stop} sound="stop">
+      <Text style={styles.icon}>{"■"}</Text>
+    </Btn>
+  );
+  const ffBtn = (
+    <Btn onPressIn={startFF} onPressOut={stopFF} sound="ff">
+      <Text style={styles.icon}>{"⏩"}</Text>
+    </Btn>
+  );
+  const nextBtn = (
+    <Btn onPress={next} sound="click" style={bigBtn}>
+      <Text style={[styles.icon, bigIcon]}>{"⏭"}</Text>
+    </Btn>
+  );
+
+  if (mainOnly) {
+    return (
+      <View style={vertical ? styles.col : styles.row}>
+        {prevBtn}{playBtn}{nextBtn}{vertical ? stopBtn : null}
+      </View>
+    );
+  }
+  if (secondaryOnly) {
+    return (
+      <View style={vertical ? styles.col : styles.row}>
+        {rwBtn}{stopBtn}{ffBtn}
+      </View>
+    );
+  }
   return (
-    <View style={styles.row}>
-      <Btn onPress={prev} sound="click" style={bigBtn}>
-        <Text style={[styles.icon, bigIcon]}>{"⏮"}</Text>
-      </Btn>
-
-      <Btn onPressIn={startRW} onPressOut={stopRW} sound="ff">
-        <Text style={styles.icon}>{"⏪"}</Text>
-      </Btn>
-
-      <Btn
-        green
-        onPress={isPlaying ? pause : play}
-        style={[styles.btnPlayLarge, bigPlayBtn]}
-        sound={isPlaying ? "click" : "play"}
-      >
-        <Text style={[styles.iconPlay, bigIconPlay]}>{isPlaying ? "⏸" : "▶"}</Text>
-      </Btn>
-
-      <Btn onPress={stop} sound="stop">
-        <Text style={styles.icon}>{"■"}</Text>
-      </Btn>
-
-      <Btn onPressIn={startFF} onPressOut={stopFF} sound="ff">
-        <Text style={styles.icon}>{"⏩"}</Text>
-      </Btn>
-
-      <Btn onPress={next} sound="click" style={bigBtn}>
-        <Text style={[styles.icon, bigIcon]}>{"⏭"}</Text>
-      </Btn>
+    <View style={vertical ? styles.col : styles.row}>
+      {prevBtn}{rwBtn}{playBtn}{stopBtn}{ffBtn}{nextBtn}
     </View>
   );
 }
 
 const BTN_BASE = {
-  backgroundColor: "#2a2a36",
-  borderColor: "#4a4a5a",
+  backgroundColor: C.panels,
+  borderColor: C.borderInput,
   borderWidth: 1.5,
   borderRadius: 6,
   paddingHorizontal: 8,
@@ -98,11 +127,16 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 4,
   },
+  col: {
+    flexDirection: "column",
+    alignItems: "center",
+    gap: 8,
+  },
   btn: BTN_BASE,
   btnPlay: {
     ...BTN_BASE,
-    backgroundColor: "#149650",
-    borderColor: "#1db060",
+    backgroundColor: C.playGreen,
+    borderColor: C.playBorder,
     borderRadius: 8,
   },
   btnPlayLarge: {
@@ -111,7 +145,7 @@ const styles = StyleSheet.create({
   },
   icon: {
     fontSize: 16,
-    color: "#c8c8d2",
+    color: C.text,
     lineHeight: 20,
   },
   iconPlay: {
