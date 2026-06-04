@@ -2,6 +2,11 @@ import React from "react";
 import { TouchableOpacity, useWindowDimensions } from "react-native";
 import Svg, { Circle, Image as SvgImage, Line, Rect } from "react-native-svg";
 
+import { C } from "@/constants/colors";
+
+const SPINDLE_OUTER = "#1a1a22";
+const SPINDLE_INNER = "#0d0d15";
+
 interface WalkmanEmptyProps {
   onTap: () => void;
 }
@@ -48,27 +53,27 @@ export default function WalkmanEmpty({ onTap }: WalkmanEmptyProps) {
         ))}
 
         {/* Reel window (empty dark) */}
-        <Rect x={28} y={82} width={344} height={120} rx={8} ry={8} fill="#0a0a0a" />
+        <Rect x={28} y={82} width={344} height={120} rx={8} ry={8} fill={C.reelWindow} />
 
         {/* Just the two spindle pins (perni) */}
         {/* Left spindle */}
-        <Circle cx={130} cy={148} r={18} fill="#1a1a22" stroke="#3a3a4a" strokeWidth={2} />
-        <Circle cx={130} cy={148} r={8} fill="#0d0d15" stroke="#4a4a5a" strokeWidth={1.5} />
-        <Line x1={130} y1={140} x2={130} y2={156} stroke="#4a4a5a" strokeWidth={1.5} />
-        <Line x1={122} y1={148} x2={138} y2={148} stroke="#4a4a5a" strokeWidth={1.5} />
+        <Circle cx={130} cy={148} r={18} fill={SPINDLE_OUTER} stroke={C.separators} strokeWidth={2} />
+        <Circle cx={130} cy={148} r={8} fill={SPINDLE_INNER} stroke={C.borderInput} strokeWidth={1.5} />
+        <Line x1={130} y1={140} x2={130} y2={156} stroke={C.borderInput} strokeWidth={1.5} />
+        <Line x1={122} y1={148} x2={138} y2={148} stroke={C.borderInput} strokeWidth={1.5} />
 
         {/* Right spindle */}
-        <Circle cx={270} cy={148} r={18} fill="#1a1a22" stroke="#3a3a4a" strokeWidth={2} />
-        <Circle cx={270} cy={148} r={8} fill="#0d0d15" stroke="#4a4a5a" strokeWidth={1.5} />
-        <Line x1={270} y1={140} x2={270} y2={156} stroke="#4a4a5a" strokeWidth={1.5} />
-        <Line x1={262} y1={148} x2={278} y2={148} stroke="#4a4a5a" strokeWidth={1.5} />
+        <Circle cx={270} cy={148} r={18} fill={SPINDLE_OUTER} stroke={C.separators} strokeWidth={2} />
+        <Circle cx={270} cy={148} r={8} fill={SPINDLE_INNER} stroke={C.borderInput} strokeWidth={1.5} />
+        <Line x1={270} y1={140} x2={270} y2={156} stroke={C.borderInput} strokeWidth={1.5} />
+        <Line x1={262} y1={148} x2={278} y2={148} stroke={C.borderInput} strokeWidth={1.5} />
 
         {/* Tape guides */}
         <Rect x={170} y={196} width={9} height={8} rx={2} fill="#333" />
         <Rect x={221} y={196} width={9} height={8} rx={2} fill="#333" />
 
         {/* Tape hole (empty) */}
-        <Rect x={183} y={240} width={34} height={9} rx={3} ry={3} fill="#0a0a0a" />
+        <Rect x={183} y={240} width={34} height={9} rx={3} ry={3} fill={C.reelWindow} />
       </Svg>
     </TouchableOpacity>
   );
