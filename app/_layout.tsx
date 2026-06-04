@@ -13,22 +13,18 @@ import { StatusBar, View } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 
 import { SafeAreaProvider } from "react-native-safe-area-context";
-import TrackPlayer from "react-native-track-player";
 
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { ensureRtpSetup, PlayerProvider } from "@/context/PlayerContext";
-import { PlaybackService } from "@/utils/PlaybackService";
+import { C } from "@/constants/colors";
 
-// Register the RNTP background service — must be at module level
-TrackPlayer.registerPlaybackService(() => PlaybackService);
-// Avvia il setup RNTP subito, prima che qualsiasi componente venga montato
 ensureRtpSetup();
 
 SplashScreen.preventAutoHideAsync();
 
 const queryClient = new QueryClient();
 
-const BG = "#1e1e26";
+const BG = C.background;
 
 function RootLayoutNav() {
   return (
