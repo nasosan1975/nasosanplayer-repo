@@ -15,6 +15,7 @@ import {
   View,
 } from "react-native";
 import { Track, usePlayer } from "@/context/PlayerContext";
+import { C } from "@/constants/colors";
 
 const BROWSER_ROW_H = 63;
 
@@ -199,12 +200,13 @@ export default function BrowserScreen() {
     useCallback(() => {
       const idx = filtered.findIndex(t => t.id === currentTrackIdRef.current);
       if (idx >= 0 && flatListRef.current) {
-        setTimeout(() => {
+        const timer = setTimeout(() => {
           flatListRef.current?.scrollToOffset({
             offset: Math.max(0, (idx - 1) * BROWSER_ROW_H),
             animated: false,
           });
         }, 80);
+        return () => clearTimeout(timer);
       }
     }, [filtered])
   );
@@ -264,7 +266,7 @@ export default function BrowserScreen() {
         <TextInput
           style={styles.searchInput}
           placeholder="Cerca brani…"
-          placeholderTextColor="#4a4a5a"
+          placeholderTextColor={C.borderInput}
           value={search}
           onChangeText={setSearch}
           returnKeyType="search"
@@ -334,7 +336,7 @@ export default function BrowserScreen() {
                 autoFocus
                 returnKeyType="next"
                 blurOnSubmit={false}
-                placeholderTextColor="#4a4a5a"
+                placeholderTextColor={C.borderInput}
                 placeholder="Titolo…"
               />
               <Text style={styles.modalFieldLabel}>Artista</Text>
@@ -344,7 +346,7 @@ export default function BrowserScreen() {
                 onChangeText={setEditArtistVal}
                 returnKeyType="done"
                 onSubmitEditing={handleEditSave}
-                placeholderTextColor="#4a4a5a"
+                placeholderTextColor={C.borderInput}
                 placeholder="Artista…"
               />
               <View style={styles.modalBtnRow}>
@@ -366,7 +368,7 @@ export default function BrowserScreen() {
 const styles = StyleSheet.create({
   root: {
     flex: 1,
-    backgroundColor: "#1e1e26",
+    backgroundColor: C.background,
   },
   header: {
     flexDirection: "row",
@@ -374,7 +376,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 12,
     borderBottomWidth: 1,
-    borderBottomColor: "#3a3a4a",
+    borderBottomColor: C.separators,
     gap: 8,
   },
   backBtn: {
@@ -384,7 +386,7 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   backIcon: {
-    color: "#64c8ff",
+    color: C.accent,
     fontSize: 32,
     lineHeight: 36,
     fontWeight: "300",
@@ -394,12 +396,12 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   headerTitle: {
-    color: "#c8c8d2",
+    color: C.text,
     fontSize: 16,
     fontWeight: "600",
   },
   headerSub: {
-    color: "#4a4a5a",
+    color: C.borderInput,
     fontSize: 12,
     marginTop: 1,
   },
@@ -407,26 +409,26 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     margin: 12,
-    backgroundColor: "#2a2a36",
+    backgroundColor: C.panels,
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: "#3a3a4a",
+    borderColor: C.separators,
     paddingHorizontal: 10,
     paddingVertical: 8,
     gap: 8,
   },
   searchIconText: {
     fontSize: 14,
-    color: "#4a4a5a",
+    color: C.borderInput,
   },
   searchInput: {
     flex: 1,
-    color: "#c8c8d2",
+    color: C.text,
     fontSize: 15,
     padding: 0,
   },
   clearIcon: {
-    color: "#4a4a5a",
+    color: C.borderInput,
     fontSize: 14,
     lineHeight: 18,
   },
@@ -439,22 +441,22 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 10,
     gap: 10,
-    backgroundColor: "#1e1e26",
+    backgroundColor: C.background,
     height: BROWSER_ROW_H - 1,
   },
   rowActive: {
-    backgroundColor: "#252530",
+    backgroundColor: C.rowActive,
     borderLeftWidth: 3,
-    borderLeftColor: "#64c8ff",
+    borderLeftColor: C.accent,
   },
   num: {
-    color: "#4a4a5a",
+    color: C.borderInput,
     fontFamily: "monospace",
     fontSize: 12,
     minWidth: 28,
   },
   numActive: {
-    color: "#64c8ff",
+    color: C.accent,
   },
   info: {
     flex: 1,
@@ -465,15 +467,15 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   title: {
-    color: "#c8c8d2",
+    color: C.text,
     fontSize: 14,
     lineHeight: 18,
   },
   titleActive: {
-    color: "#64c8ff",
+    color: C.accent,
   },
   artist: {
-    color: "#8cc8ff",
+    color: C.notes,
     fontSize: 11,
     lineHeight: 14,
   },
@@ -482,18 +484,18 @@ const styles = StyleSheet.create({
   },
   editIcon: {
     fontSize: 18,
-    color: "#4a4a5a",
+    color: C.borderInput,
   },
   star: {
     fontSize: 20,
-    color: "#4a4a5a",
+    color: C.borderInput,
   },
   starActive: {
-    color: "#64c8ff",
+    color: C.accent,
   },
   sep: {
     height: 1,
-    backgroundColor: "#2a2a36",
+    backgroundColor: C.panels,
     marginLeft: 56,
   },
   empty: {
@@ -504,10 +506,10 @@ const styles = StyleSheet.create({
   },
   emptyIcon: {
     fontSize: 48,
-    color: "#3a3a4a",
+    color: C.separators,
   },
   emptyText: {
-    color: "#4a4a5a",
+    color: C.borderInput,
     fontSize: 15,
   },
   modalOverlay: {
@@ -517,33 +519,33 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   modalCard: {
-    backgroundColor: "#2a2a36",
+    backgroundColor: C.panels,
     borderRadius: 10,
     borderWidth: 1,
-    borderColor: "#3a3a4a",
+    borderColor: C.separators,
     padding: 20,
     width: 300,
     gap: 8,
   },
   modalTitle: {
-    color: "#64c8ff",
+    color: C.accent,
     fontSize: 11,
     letterSpacing: 1.4,
     fontWeight: "600",
     marginBottom: 4,
   },
   modalFieldLabel: {
-    color: "#8cc8ff",
+    color: C.notes,
     fontSize: 11,
     letterSpacing: 0.8,
     marginTop: 4,
   },
   modalInput: {
-    backgroundColor: "#16161e",
+    backgroundColor: C.dark,
     borderWidth: 1,
-    borderColor: "#64c8ff",
+    borderColor: C.accent,
     borderRadius: 6,
-    color: "#c8c8d2",
+    color: C.text,
     fontSize: 15,
     paddingHorizontal: 10,
     paddingVertical: 8,
@@ -559,16 +561,16 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     borderRadius: 6,
     borderWidth: 1,
-    borderColor: "#3a3a4a",
+    borderColor: C.separators,
   },
-  modalBtnCancelText: { color: "#8cc8ff", fontSize: 14 },
+  modalBtnCancelText: { color: C.notes, fontSize: 14 },
   modalBtnSave: {
     paddingHorizontal: 16,
     paddingVertical: 8,
     borderRadius: 6,
-    backgroundColor: "#149650",
+    backgroundColor: C.playGreen,
     borderWidth: 1,
-    borderColor: "#1db060",
+    borderColor: C.playBorder,
   },
   modalBtnSaveText: { color: "white", fontSize: 14, fontWeight: "600" },
 });
