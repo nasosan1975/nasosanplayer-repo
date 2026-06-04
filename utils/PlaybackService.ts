@@ -40,7 +40,7 @@ export async function PlaybackService() {
       },
       progressUpdateEventInterval: 1,
     });
-  } catch {}
+  } catch (e) { console.error("[PlaybackService] updateOptions failed:", e); }
 
   TrackPlayer.addEventListener(Event.RemotePlay, () => TrackPlayer.play());
 
