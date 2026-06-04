@@ -1,5 +1,8 @@
-import React, { useEffect, useRef, useState } from "react";
-import { Animated, Linking, TouchableOpacity, useWindowDimensions } from "react-native";
+// Analyst: NasoSan | Dev: Claude AI
+// Licenza: CC BY 4.0 – nasosan.it | https://creativecommons.org/licenses/by/4.0/
+
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { Animated, Linking, TouchableOpacity, View, useWindowDimensions } from "react-native";
 import Svg, {
   Circle,
   ClipPath,
@@ -12,7 +15,14 @@ import Svg, {
   Text as SvgText,
 } from "react-native-svg";
 
-const APP_VERSION = "v.0.845";
+import { APP_VERSION_DISPLAY } from "@/constants/app";
+import { C } from "@/constants/colors";
+
+const REEL_OUTER = "#7B3A10";
+const REEL_INNER = "#4a2008";
+const HUB_FILL   = "#1e1e10";
+const TAPE_COLOR  = "#3a1808"; // distinto da C.tapeColor (#1a1200) — divergenza voluta per design
+const CASSETTE_TEXT = "#1a1a1a";
 
 interface CassetteProps {
   folderName: string;
@@ -45,20 +55,48 @@ function starPath(cx: number, cy: number, R: number, r: number): string {
   return d + "Z";
 }
 
-const HUB_R = 14;
-const MAX_R = 46;
-const MIN_WINDING_R = HUB_R + 4;
+// SVG canvas = image dimensions
+const svgW = 518;
+const svgH = 323;
 
-// SVG canvas size — extended bottom for taller lower body
-const svgW = 400;
-const svgH = 282;          // was 252 — extra 30px below
-const leftCx = 130;
-const rightCx = 270;
-const reelCy = 148;
-const tapeFloorY = 196;
-// Bottom label position and size
-const labelY = 207;
-const labelH = 52;          // was 30 — ~1 cm taller
+// Reel window
+const RWX = 42;
+const RWY = 104;
+const RWW = 434;
+const RWH = 154;
+
+// Reel centers and radii
+const leftCx = 146.6;
+const rightCx = 363;
+const leftCy = 139;
+const rightCy = 138;
+const HUB_R = 35;
+const MAX_R = 113;
+const MIN_WINDING_R = 48;
+
+// Tape guides
+const GUIDE_Y = RWY + RWH - 18;
+const GUIDE_LX = 228;
+const GUIDE_RX = 282;
+
+// Track title — striscia bianca cassetta (Y≈210-255)
+const HOLES_TOP = RWY + RWH + 4;       // = 262
+const HOLES_CLIP_X = RWX + 8;          // = 50 (quasi bordo sinistro cassetta)
+const HOLES_CLIP_W = RWW - 16;         // = 418 (quasi tutta la larghezza cassetta)
+const TITLE_CLIP_H = 28;
+const ARTIST_CLIP_H = 24;
+const TITLE_CLIP_Y = 198;              // 3mm sotto
+const TITLE_TEXT_Y = 213;              // TITLE_CLIP_Y + 15
+const ARTIST_CLIP_Y = 244;             // striscia bianca, sotto titolo
+const ARTIST_TEXT_Y = 260;             // ARTIST_CLIP_Y + 16
+
+// A/B badge — fixed bottom left
+const BADGE_X = 22;
+const BADGE_Y = svgH - 23;             // = 300 (0.5cm up)
+
+// Star — fixed bottom right, +100% (R 10→20, r 4→8), centro sale e va sx
+const STAR_CX = svgW - 42;             // = 476 (bottom-right fisso a 496)
+const STAR_CY_POS = svgH - 42;         // = 281 (bottom-right fisso a 301)
 
 export default function CassetteSVG({
   folderName,
@@ -91,9 +129,7 @@ export default function CassetteSVG({
   const prevSideRef = useRef(side);
 
   const [titleOffset, setTitleOffset] = useState(0);
-  const [artistOffset, setArtistOffset] = useState(0);
   const titleAnimVal = useRef(new Animated.Value(0)).current;
-  const artistAnimVal = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
     progressRef.current = sideProgress;
@@ -102,17 +138,9 @@ export default function CassetteSVG({
   useEffect(() => {
     if (side !== prevSideRef.current) {
       prevSideRef.current = side;
-      Animated.timing(flipAnim, {
-        toValue: 0,
-        duration: 220,
-        useNativeDriver: true,
-      }).start(() => {
+      Animated.timing(flipAnim, { toValue: 0, duration: 220, useNativeDriver: true }).start(() => {
         setDisplayedSide(side);
-        Animated.timing(flipAnim, {
-          toValue: 1,
-          duration: 220,
-          useNativeDriver: true,
-        }).start();
+        Animated.timing(flipAnim, { toValue: 1, duration: 220, useNativeDriver: true }).start();
       });
     }
   }, [side, flipAnim]);
@@ -137,28 +165,19 @@ export default function CassetteSVG({
         }
       }, 50);
     } else {
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current);
-        intervalRef.current = null;
-      }
+      if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null; }
     }
-    return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-    };
+    return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
   }, [isPlaying, isFF, isRW]);
 
-  // Marquee for title text on red label
+  // Marquee titolo nella holes area
   useEffect(() => {
-    // textX/textMaxX specchiati per lato A e B (uguale a render)
-    const tx = displayedSide === "A" ? 42 + 10 : 54;
-    const tmx = displayedSide === "A" ? svgW - 14 : svgW - 6 - 42 - 10;
-    const CHAR_W = 10;
-    const labelW = tmx - tx;
+    const CHAR_W = 11;
     const textW = trackTitle.length * CHAR_W;
     titleAnimVal.setValue(0);
     setTitleOffset(0);
-    if (textW <= labelW) return;
-    const dist = Math.ceil(textW - labelW + 30);
+    if (textW <= HOLES_CLIP_W) return;
+    const dist = Math.ceil(textW - HOLES_CLIP_W + 20);
     const id = titleAnimVal.addListener(({ value }) => setTitleOffset(value));
     const anim = Animated.loop(
       Animated.sequence([
@@ -170,37 +189,13 @@ export default function CassetteSVG({
     );
     anim.start();
     return () => { anim.stop(); titleAnimVal.removeListener(id); titleAnimVal.setValue(0); setTitleOffset(0); };
-  }, [trackTitle, displayedSide, titleAnimVal]);
+  }, [trackTitle, titleAnimVal]);
 
-  // Marquee for artist text on red label
-  useEffect(() => {
-    const tx = displayedSide === "A" ? 42 + 10 : 54;
-    const tmx = displayedSide === "A" ? svgW - 14 : svgW - 6 - 42 - 10;
-    const CHAR_W = 8;
-    const labelW = tmx - tx;
-    const textW = trackArtist.length * CHAR_W;
-    artistAnimVal.setValue(0);
-    setArtistOffset(0);
-    if (textW <= labelW) return;
-    const dist = Math.ceil(textW - labelW + 30);
-    const id = artistAnimVal.addListener(({ value }) => setArtistOffset(value));
-    const anim = Animated.loop(
-      Animated.sequence([
-        Animated.delay(1600),
-        Animated.timing(artistAnimVal, { toValue: dist, duration: dist * 20, useNativeDriver: false }),
-        Animated.delay(600),
-        Animated.timing(artistAnimVal, { toValue: 0, duration: 0, useNativeDriver: false }),
-      ])
-    );
-    anim.start();
-    return () => { anim.stop(); artistAnimVal.removeListener(id); artistAnimVal.setValue(0); setArtistOffset(0); };
-  }, [trackArtist, displayedSide, artistAnimVal]);
 
   const p = Math.max(0, Math.min(1, sideProgress));
   const leftWindingR = MIN_WINDING_R + (MAX_R - MIN_WINDING_R) * (1 - p);
   const rightWindingR = MIN_WINDING_R + (MAX_R - MIN_WINDING_R) * p;
 
-  // Scale: fit within available width AND height in landscape
   const maxW = isLandscape ? Math.min(width * 0.62, 500) : Math.max(1, width - 24);
   const maxH = isLandscape ? Math.max(1, height - 110) : Math.max(1, height);
   const scaleW = maxW / svgW;
@@ -209,219 +204,185 @@ export default function CassetteSVG({
   const containerW = svgW * scale;
   const containerH = svgH * scale;
 
-  // ── Curved tape: exits from bottom tangent of each reel ──────────────────
-  // Tape tangent point: 40% of winding radius horizontal offset from center
-  const tapeFrac = 0.4;
-  const lOffX = leftWindingR * tapeFrac;
-  const lOffY = Math.sqrt(leftWindingR * leftWindingR - lOffX * lOffX);
-  const tapeLX = leftCx - lOffX;           // slightly left of center of left reel
-  const tapeLY = reelCy + lOffY;           // below center, on circle
-
-  const rOffX = rightWindingR * tapeFrac;
-  const rOffY = Math.sqrt(rightWindingR * rightWindingR - rOffX * rOffX);
-  const tapeRX = rightCx + rOffX;
-  const tapeRY = reelCy + rOffY;
-
-  // Rounded corner radius at floor (Q bezier control = exact corner point)
-  const cornerR = 14;
-  const tapePath =
-    `M ${tapeLX.toFixed(1)} ${tapeLY.toFixed(1)} ` +
-    `Q ${tapeLX.toFixed(1)} ${tapeFloorY} ${(tapeLX + cornerR).toFixed(1)} ${tapeFloorY} ` +
-    `L ${(tapeRX - cornerR).toFixed(1)} ${tapeFloorY} ` +
-    `Q ${tapeRX.toFixed(1)} ${tapeFloorY} ${tapeRX.toFixed(1)} ${tapeRY.toFixed(1)}`;
-
-  const starCx = displayedSide === "A" ? 372 : 28;
-  const starCy = labelY + labelH * 0.5;
-
-  // Folder name truncated (static label — no marquee needed)
-  const folderText = folderName.length  > 13 ? folderName.substring(0, 12) + "…" : folderName;
-
-  // Badge dimensions
-  const badgeW = 42;
-  // star for side B is at cx=28, r=18 → right edge at 46; add 8 margin → 54
-  const textX = displayedSide === "A" ? badgeW + 10 : 54;
-  const textMaxX = displayedSide === "A" ? svgW - 14 : svgW - 6 - badgeW - 10;
+  const folderText = folderName.length > 9 ? folderName.substring(0, 8) + "…" : folderName;
+  const containerStyle = useMemo(() => ({ width: containerW, height: containerH }), [containerW, containerH]);
 
   return (
+    <View style={containerStyle}>
     <Animated.View style={{ transform: [{ scaleX: flipAnim }] }}>
-    <TouchableOpacity
-      onPress={() => { if (subPressedRef.current) { subPressedRef.current = false; return; } onTap(); }}
-      activeOpacity={0.92}
-    >
-      <Svg width={containerW} height={containerH} viewBox={`0 0 ${svgW} ${svgH}`}>
-        <Defs>
-          <ClipPath id="titleClip">
-            <Rect x={textX} y={labelY + 4} width={textMaxX - textX} height={labelH * 0.55} />
-          </ClipPath>
-          <ClipPath id="artistClip">
-            <Rect x={textX} y={labelY + labelH * 0.52} width={textMaxX - textX} height={labelH * 0.42} />
-          </ClipPath>
-          <ClipPath id="reelWindow">
-            <Rect x={28} y={82} width={344} height={120} />
-          </ClipPath>
-        </Defs>
+      <TouchableOpacity
+        onPress={() => { if (subPressedRef.current) { subPressedRef.current = false; return; } onTap(); }}
+        activeOpacity={0.92}
+      >
+        <Svg width={containerW} height={containerH} viewBox={`0 0 ${svgW} ${svgH}`}>
+          <Defs>
+            <ClipPath id="titleClip">
+              <Rect x={HOLES_CLIP_X} y={TITLE_CLIP_Y} width={HOLES_CLIP_W} height={TITLE_CLIP_H} />
+            </ClipPath>
+          </Defs>
 
-        {/* Outer body */}
-        <Rect x={0} y={0} width={svgW} height={svgH} rx={12} ry={12} fill="#2d2d2d" stroke="#555" strokeWidth={2} />
+          {/* Dark background reel window — sotto le bobine */}
+          <Rect x={RWX} y={RWY} width={RWW} height={RWH} rx={8} fill={C.reelWindow} />
 
-        {/* Top label (white) */}
-        <Rect x={6} y={6} width={388} height={68} rx={6} ry={6} fill="#f0f0e8" />
+          {/* Left reel */}
+          <Circle cx={leftCx} cy={leftCy} r={leftWindingR} fill={REEL_OUTER} />
+          <Circle cx={leftCx} cy={leftCy} r={HUB_R + 2} fill={REEL_INNER} />
+          <G transform={`translate(${leftCx},${leftCy}) rotate(${leftAngle})`}>
+            <Circle cx={0} cy={0} r={HUB_R} fill={HUB_FILL} stroke={C.accent} strokeWidth={1.5} />
+            <Line x1={0} y1={-HUB_R} x2={0} y2={HUB_R} stroke={C.accent} strokeWidth={1.5} />
+            <Line x1={-HUB_R} y1={0} x2={HUB_R} y2={0} stroke={C.accent} strokeWidth={1.5} />
+          </G>
 
-        {/* Folder name — bold italic, large, centred left of NS icon */}
-        <SvgText
-          x={162}
-          y={54}
-          textAnchor="middle"
-          fontSize={40}
-          fontStyle="italic"
-          fontWeight="bold"
-          fontFamily="serif"
-          fill="#1a1a1a"
-        >
-          {folderText}
-        </SvgText>
+          {/* Right reel */}
+          <Circle cx={rightCx} cy={rightCy} r={rightWindingR} fill={REEL_OUTER} />
+          <Circle cx={rightCx} cy={rightCy} r={HUB_R + 2} fill={REEL_INNER} />
+          <G transform={`translate(${rightCx},${rightCy}) rotate(${rightAngle})`}>
+            <Circle cx={0} cy={0} r={HUB_R} fill={HUB_FILL} stroke={C.accent} strokeWidth={1.5} />
+            <Line x1={0} y1={-HUB_R} x2={0} y2={HUB_R} stroke={C.accent} strokeWidth={1.5} />
+            <Line x1={-HUB_R} y1={0} x2={HUB_R} y2={0} stroke={C.accent} strokeWidth={1.5} />
+          </G>
 
-        {/* Version number — to the left of the NS icon */}
-        <SvgText
-          x={309}
-          y={57}
-          textAnchor="end"
-          fontSize={9}
-          fontFamily="monospace"
-          fill="#000000"
-        >{APP_VERSION}</SvgText>
-
-        {/* NS icon — top-right corner, shifted left */}
-        <SvgImage
-          x={316}
-          y={10}
-          width={52}
-          height={52}
-          href={require("../assets/images/ns_icon.png")}
-          preserveAspectRatio="xMidYMid meet"
-          onPress={() => Linking.openURL("https://www.nasosan.it")}
-        />
-
-        {/* Corner screws */}
-        {([[18, 20], [382, 20], [18, 260], [382, 260]] as [number, number][]).map(([cx, cy], i) => (
-          <React.Fragment key={i}>
-            <Circle cx={cx} cy={cy} r={6} fill="#444" stroke="#333" strokeWidth={1} />
-            <Line x1={cx - 3} y1={cy} x2={cx + 3} y2={cy} stroke="#666" strokeWidth={1} />
-            <Line x1={cx} y1={cy - 3} x2={cx} y2={cy + 3} stroke="#666" strokeWidth={1} />
-          </React.Fragment>
-        ))}
-
-        {/* Reel window */}
-        <Rect x={28} y={82} width={344} height={120} rx={8} ry={8} fill="#0a0a0a" />
-
-        {/* ── TAPE: curved U-shape from bottom of left reel → floor → bottom of right reel ── */}
-        <G clipPath="url(#reelWindow)">
-          <Path
-            d={tapePath}
-            stroke="#7B3A10"
-            strokeWidth={4}
-            fill="none"
-            strokeLinecap="round"
-            strokeLinejoin="round"
+          {/* Nastro: tratta sinistra bobina→guida sx (X dinamica, Y clamped) */}
+          <Line
+            x1={Math.min(leftCx + leftWindingR * 0.6, 213)}
+            y1={Math.min(leftCy + leftWindingR * 0.15, 163)}
+            x2={216}
+            y2={163}
+            stroke={TAPE_COLOR}
+            strokeWidth={6}
           />
-        </G>
+          {/* Guide nastro sx */}
+          <Rect x={216} y={158} width={5} height={10} rx={2} fill="#666" />
+          {/* Nastro: striscia orizzontale nella finestra trasparente centrale */}
+          <Rect x={218} y={160} width={66} height={7} rx={1} fill={TAPE_COLOR} />
+          {/* Guide nastro dx */}
+          <Rect x={284} y={158} width={5} height={10} rx={2} fill="#666" />
+          {/* Nastro: tratta destra guida dx→bobina (X dinamica, Y clamped) */}
+          <Line
+            x1={290}
+            y1={163}
+            x2={Math.max(rightCx - rightWindingR * 0.6, 297)}
+            y2={Math.min(rightCy + rightWindingR * 0.15, 163)}
+            stroke={TAPE_COLOR}
+            strokeWidth={6}
+          />
 
-        {/* Left reel */}
-        <G>
-          <Circle cx={leftCx} cy={reelCy} r={leftWindingR} fill="#7B3A10" />
-          <Circle cx={leftCx} cy={reelCy} r={HUB_R + 2} fill="#4a2008" />
-          <G transform={`translate(${leftCx},${reelCy}) rotate(${leftAngle})`}>
-            <Circle cx={0} cy={0} r={HUB_R} fill="#1e1e10" stroke="#64c8ff" strokeWidth={1.5} />
-            <Line x1={0} y1={-(HUB_R)} x2={0} y2={HUB_R} stroke="#64c8ff" strokeWidth={1.5} />
-            <Line x1={-(HUB_R)} y1={0} x2={HUB_R} y2={0} stroke="#64c8ff" strokeWidth={1.5} />
-          </G>
-        </G>
+          {/* Cassetta PNG — sopra bobine, finestre ovali trasparenti mostrano animazione */}
+          <SvgImage
+            x={0} y={0} width={svgW} height={svgH}
+            href={require("../assets/images/cassetta_base.png")}
+            preserveAspectRatio="xMidYMid meet"
+          />
 
-        {/* Right reel */}
-        <G>
-          <Circle cx={rightCx} cy={reelCy} r={rightWindingR} fill="#7B3A10" />
-          <Circle cx={rightCx} cy={reelCy} r={HUB_R + 2} fill="#4a2008" />
-          <G transform={`translate(${rightCx},${reelCy}) rotate(${rightAngle})`}>
-            <Circle cx={0} cy={0} r={HUB_R} fill="#1e1e10" stroke="#64c8ff" strokeWidth={1.5} />
-            <Line x1={0} y1={-(HUB_R)} x2={0} y2={HUB_R} stroke="#64c8ff" strokeWidth={1.5} />
-            <Line x1={-(HUB_R)} y1={0} x2={HUB_R} y2={0} stroke="#64c8ff" strokeWidth={1.5} />
-          </G>
-        </G>
-
-        {/* Stop countdown — tra le due bobine */}
-        {stopCountdown != null && (
+          {/* Titolo cassetta — font corsivo inclinato scrittura umana */}
           <SvgText
-            x={200}
-            y={157}
+            x={195}
+            y={74}
             textAnchor="middle"
-            fontSize={44}
-            fontFamily="monospace"
+            fontSize={68}
+            fontStyle="italic"
             fontWeight="bold"
-            fill="#64c8ff"
+            fontFamily="cursive"
+            fill={CASSETTE_TEXT}
+            transform="rotate(-10, 195, 74)"
           >
-            {String(stopCountdown)}
+            {folderText}
           </SvgText>
-        )}
 
-        {/* Tape guides */}
-        <Rect x={170} y={196} width={9} height={8} rx={2} fill="#555" />
-        <Rect x={221} y={196} width={9} height={8} rx={2} fill="#555" />
+          {/* Numero versione */}
+          <SvgText
+            x={402}
+            y={87}
+            textAnchor="middle"
+            fontSize={27}
+            fontFamily="monospace"
+            fill="#333333"
+          >
+            {APP_VERSION_DISPLAY}
+          </SvgText>
 
-        {/* Bottom label (red) — taller now */}
-        <Rect x={6} y={labelY} width={388} height={labelH} rx={4} ry={4} fill="#c8200a" />
+          {/* Logo NS — allineato al nome cassetta, destra */}
+          <SvgImage
+            x={421}
+            y={101}
+            width={42}
+            height={42}
+            href={require("../assets/images/ns_icon.png")}
+            preserveAspectRatio="xMidYMid meet"
+            onPress={() => Linking.openURL("https://www.nasosan.it")}
+          />
 
-        {displayedSide === "A" ? (
-          <>
-            {/* Side A badge */}
-            <Rect x={6} y={labelY} width={badgeW} height={labelH} rx={0} fill="white" onPress={onBadgeTap} />
-            <Rect x={6} y={labelY} width={10} height={labelH} rx={4} fill="white" />
-            <SvgText x={6 + badgeW / 2} y={labelY + labelH * 0.65} textAnchor="middle" fontSize={22} fontWeight="bold" fill="#c8200a" onPress={onBadgeTap}>A</SvgText>
-            {/* Track title */}
-            <SvgText x={textX - titleOffset} y={labelY + labelH * 0.38} fontSize={16} fontStyle="italic" fontFamily="serif" fill="white" clipPath="url(#titleClip)">
-              {trackTitle}
+
+          {/* Titolo brano con scorrimento */}
+          <SvgText
+            x={HOLES_CLIP_X - titleOffset}
+            y={TITLE_TEXT_Y}
+            fontSize={22}
+            fontStyle="italic"
+            fontFamily="serif"
+            fill={CASSETTE_TEXT}
+            clipPath="url(#titleClip)"
+          >
+            {trackTitle}
+          </SvgText>
+
+          {/* Tap overlay titolo */}
+          <Rect
+            x={HOLES_CLIP_X} y={TITLE_CLIP_Y} width={HOLES_CLIP_W} height={TITLE_CLIP_H}
+            fill="transparent"
+            onPress={() => { subPressedRef.current = true; onTitleTap?.(); }}
+          />
+
+          {/* Stop countdown — sopra tutto */}
+          {stopCountdown != null && (
+            <SvgText
+              x={(leftCx + rightCx) / 2}
+              y={136 + 16}
+              textAnchor="middle"
+              fontSize={44}
+              fontFamily="monospace"
+              fontWeight="bold"
+              fill={C.accent}
+            >
+              {String(stopCountdown)}
             </SvgText>
-            {/* Artist */}
-            <SvgText x={textX - artistOffset} y={labelY + labelH * 0.72} fontSize={11} fontFamily="monospace" fill="#ffcccc" clipPath="url(#artistClip)">
-              {trackArtist}
-            </SvgText>
-            {/* Tappable overlays for inline editing */}
-            <Rect x={textX} y={labelY + 2} width={textMaxX - textX} height={labelH * 0.46} fill="transparent" onPress={() => { subPressedRef.current = true; onTitleTap?.(); }} />
-            <Rect x={textX} y={labelY + labelH * 0.50} width={textMaxX - textX} height={labelH * 0.44} fill="transparent" onPress={() => { subPressedRef.current = true; onArtistTap?.(); }} />
-          </>
-        ) : (
-          <>
-            {/* Track title */}
-            <SvgText x={textX - titleOffset} y={labelY + labelH * 0.38} fontSize={16} fontStyle="italic" fontFamily="serif" fill="white" clipPath="url(#titleClip)">
-              {trackTitle}
-            </SvgText>
-            {/* Artist */}
-            <SvgText x={textX - artistOffset} y={labelY + labelH * 0.72} fontSize={11} fontFamily="monospace" fill="#ffcccc" clipPath="url(#artistClip)">
-              {trackArtist}
-            </SvgText>
-            {/* Tappable overlays for inline editing */}
-            <Rect x={textX} y={labelY + 2} width={textMaxX - textX} height={labelH * 0.46} fill="transparent" onPress={() => { subPressedRef.current = true; onTitleTap?.(); }} />
-            <Rect x={textX} y={labelY + labelH * 0.50} width={textMaxX - textX} height={labelH * 0.44} fill="transparent" onPress={() => { subPressedRef.current = true; onArtistTap?.(); }} />
-            {/* Side B badge */}
-            <Rect x={svgW - 6 - badgeW} y={labelY} width={badgeW} height={labelH} rx={0} fill="white" onPress={() => { subPressedRef.current = true; onBadgeTap?.(); }} />
-            <Rect x={svgW - 6 - 10} y={labelY} width={10} height={labelH} rx={4} fill="white" />
-            <SvgText x={svgW - 6 - badgeW / 2} y={labelY + labelH * 0.65} textAnchor="middle" fontSize={22} fontWeight="bold" fill="#c8200a" onPress={() => { subPressedRef.current = true; onBadgeTap?.(); }}>B</SvgText>
-          </>
-        )}
+          )}
 
-        {/* Favorite star */}
-        <Circle cx={starCx} cy={starCy} r={18} fill="transparent" onPress={() => { subPressedRef.current = true; onStarTap?.(); }} />
-        <Path
-          d={starPath(starCx, starCy, 11, 5)}
-          fill={isFavorite ? "#64c8ff" : "none"}
-          stroke="#64c8ff"
-          strokeWidth={1.5}
-          onPress={() => { subPressedRef.current = true; onStarTap?.(); }}
-        />
+          {/* Badge A/B — angolo in basso a sx fisso, cresce in alto a dx (+50%) */}
+          <Rect x={BADGE_X - 6} y={BADGE_Y - 45} width={48} height={51} rx={5} fill="transparent" />
+          <SvgText
+            x={BADGE_X + 18}
+            y={BADGE_Y}
+            textAnchor="middle"
+            fontSize={45}
+            fontWeight="bold"
+            fill={C.accent}
+          >
+            {displayedSide}
+          </SvgText>
+          {/* Tap overlay badge */}
+          <Rect
+            x={BADGE_X - 6} y={BADGE_Y - 45} width={48} height={51}
+            fill="transparent"
+            onPress={() => { subPressedRef.current = true; onBadgeTap?.(); }}
+          />
 
-        {/* Tape slot hole at bottom */}
-        <Rect x={183} y={266} width={34} height={9} rx={3} ry={3} fill="#0a0a0a" />
-      </Svg>
-    </TouchableOpacity>
+          {/* Stella — angolo in basso a dx fisso, +100% */}
+          <Circle
+            cx={STAR_CX} cy={STAR_CY_POS} r={36}
+            fill="transparent"
+            onPress={() => { subPressedRef.current = true; onStarTap?.(); }}
+          />
+          <Path
+            d={starPath(STAR_CX, STAR_CY_POS, 20, 8)}
+            fill={isFavorite ? C.accent : "none"}
+            stroke={C.accent}
+            strokeWidth={1.5}
+            onPress={() => { subPressedRef.current = true; onStarTap?.(); }}
+          />
+        </Svg>
+      </TouchableOpacity>
     </Animated.View>
+    </View>
   );
 }
