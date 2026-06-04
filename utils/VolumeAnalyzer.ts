@@ -13,6 +13,11 @@ export var VolumeAnalyzer = {
     return Native.analyzeRMS(uri);
   },
 
+  cancelAnalysis(): void {
+    if (!Native) return;
+    Native.cancelAnalysis();
+  },
+
   applyGain(gainDb: number): Promise<void> {
     if (!Native) return Promise.resolve();
     return Native.applyGain(gainDb);
