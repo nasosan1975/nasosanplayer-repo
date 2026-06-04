@@ -2,6 +2,7 @@ import React from "react";
 import { StyleSheet, Text, View } from "react-native";
 
 import { usePlayer } from "@/context/PlayerContext";
+import { C } from "@/constants/colors";
 
 function fmt(ms: number): string {
   const s = Math.floor(ms / 1000);
@@ -52,10 +53,10 @@ export default function TimeDisplay({ horizontal = false, compact = false }: Tim
 
 const styles = StyleSheet.create({
   boxCompact: {
-    backgroundColor: "#16161e",
+    backgroundColor: C.dark,
     borderRadius: 6,
     borderWidth: 1,
-    borderColor: "#3a3a4a",
+    borderColor: C.separators,
     paddingHorizontal: 8,
     paddingVertical: 5,
     flexDirection: "column",
@@ -63,40 +64,40 @@ const styles = StyleSheet.create({
     gap: 1,
   },
   compactCurrent: {
-    color: "#64c8ff",
+    color: C.accent,
     fontFamily: "monospace",
     fontSize: 12,
     letterSpacing: 0.5,
     lineHeight: 15,
   },
   compactSep: {
-    color: "#3a3a4a",
+    color: C.separators,
     fontFamily: "monospace",
     fontSize: 12,
     lineHeight: 15,
   },
   compactTotal: {
-    color: "#7a98b8",
+    color: C.timeTotal,
     fontFamily: "monospace",
     fontSize: 12,
     letterSpacing: 0.5,
     lineHeight: 15,
   },
   box: {
-    backgroundColor: "#16161e",
+    backgroundColor: C.dark,
     borderRadius: 6,
     borderWidth: 1,
-    borderColor: "#3a3a4a",
+    borderColor: C.separators,
     paddingHorizontal: 5,
     paddingVertical: 5,
     alignItems: "center",
     width: 46,
   },
   boxH: {
-    backgroundColor: "#16161e",
+    backgroundColor: C.dark,
     borderRadius: 6,
     borderWidth: 1,
-    borderColor: "#3a3a4a",
+    borderColor: C.separators,
     paddingHorizontal: 8,
     paddingVertical: 6,
     flexDirection: "row",
@@ -108,14 +109,14 @@ const styles = StyleSheet.create({
     gap: 1,
   },
   labelH: {
-    color: "#4a6a8a",
+    color: C.labelDim,
     fontFamily: "monospace",
     fontSize: 8,
     letterSpacing: 1,
     lineHeight: 10,
   },
   current: {
-    color: "#64c8ff",
+    color: C.accent,
     fontFamily: "monospace",
     fontSize: 12,
     letterSpacing: 0.5,
@@ -124,16 +125,16 @@ const styles = StyleSheet.create({
   divider: {
     width: 28,
     height: 1,
-    backgroundColor: "#3a3a4a",
+    backgroundColor: C.separators,
     marginVertical: 2,
   },
   dividerV: {
     width: 1,
     height: 28,
-    backgroundColor: "#3a3a4a",
+    backgroundColor: C.separators,
   },
   total: {
-    color: "#7a98b8",
+    color: C.timeTotal,
     fontFamily: "monospace",
     fontSize: 12,
     letterSpacing: 0.5,
