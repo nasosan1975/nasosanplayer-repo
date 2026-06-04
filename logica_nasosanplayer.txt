@@ -1,0 +1,602 @@
+==============================================================
+  NASOSAN PLAYER — LOGICA DI FUNZIONAMENTO COMPLETA
+  Versione app: 1.28  |  Documento aggiornato: 2026-06-03
+==============================================================
+
+SCOPO
+App musicale retro ispirata alle cassette a nastro. Riproduce file
+audio locali da cartelle Android. Nessun dato inviato online.
+Solo Android. Tema scuro fisso.
+
+
+==============================================================
+1. STACK TECNICO
+==============================================================
+
+- React Native + Expo (Expo Router, file-based navigation)
+- Playback audio: Media3/ExoPlayer tramite NasoSanPlaybackService
+- Player setup tramite NasoSanPlayer.setup({}) una sola volta (flag rtpReady)
+- Accesso file: Android Storage Access Framework (SAF) via expo-file-system/legacy
+- SVG: react-native-svg
+- Persistenza: AsyncStorage + file JSON scritto nella cartella musicale
+- Native modules custom iniettati via Expo config plugins (plugin JS che
+  scrivono codice Kotlin a build-time):
+    * withMedia3Player.js  — NasoSanPlaybackService (Media3), NasoSanPlayerModule,
+                             TrackCacheModule, CarModeModule,
+                             SpeechnotesWidgetModule, SpeechnotesWidgetViewManager
+    * withVolumeAnalyzer.js — analisi RMS e gain via MediaCodec + LoudnessEnhancer
+    * withWmaPlayer.js     — stub vuoto (WMA rimosso)
+    * withAbiFilter.js     — solo arm64-v8a
+    * withDisableNewArch.js — newArchEnabled: false
+
+
+==============================================================
+2. NAVIGAZIONE
+==============================================================
+
+3 schermate via Expo Router:
+
+a) / (tab principale)         → PlayerScreen   [index.tsx]
+b) /settings                  → SettingsScreen [settings.tsx]  (push modale)
+c) /browser                   → BrowserScreen  [browser.tsx]   (push, apre SAF)
+
+Dalla schermata principale:
+  - Tocco cassetta senza cartella → vai a /settings
+  - Tocco cassetta con cartella   → vai a /browser
+  - Tocco ⚙ (bottone IMP)        → vai a /settings
+  - Tocco countdown attivo        → annulla stop, riprendi play
+
+
+==============================================================
+3. TEMA COLORI (fisso, dark)
+==============================================================
+
+Sfondo finestre/root:       #1e1e26
+Pannelli/cards/bottoni:     #2a2a36
+Input/Entry:                #2d2d37
+Aree scure (log, display):  #16161e
+Separatori/bordi:           #3a3a4a
+Testo label principale:     #c8c8d2
+Testo input:                #e6e6f0
+Bordo input:                #4a4a5a
+
+Bottone primario (verde):   bg #149650, border #1db060
+Bottone pericolo (rosso):   bg #2a1616, border #e05555
+Bottone neutro:             bg #2a2a36, border #4a4a5a
+Bottone attivo (blu):       border #64c8ff
+
+Accento info/blu:           #64c8ff
+Note/blu chiaro:            #8cc8ff
+Warning/arancio:            #ffb432
+OK/verde:                   #64c864
+Errore/rosso:               #e05555
+Testo disabilitato:         #4a4a5a
+
+Icone e testo bottoni:      #c8c8d2
+Icone/testo attivi:         #64c8ff
+Counter/display tempo:      #64c8ff (font monospace)
+Tempo totale:               #7a98b8 (font monospace)
+
+
+==============================================================
+4. SCHERMATA PRINCIPALE — PORTRAIT
+==============================================================
+
+Layout (flex column, justify space-between):
+
+  [logo NasoSan centrato, 280x56px, cliccabile → nasosan.it]
+  [cassetta SVG (occupa spazio disponibile, flex 1)]
+  [hint "Tocca il player per selezionare una cassetta" se no cartella]
+  [widget Speechnotes (flex 1, solo se speechnoteEnabled && isCarMode)]
+  [riga controlli: ControlButtons + bottone NORM]
+  [gap 8px]
+  [BottomRow]
+
+Widget Speechnotes area: flex column, figli flex 1 / SpeechnotesWidgetView flex 8 / flex 1
+  → margini 10% top/bottom sull'altezza disponibile.
+  Tocco widget → pause() (per permettere registrazione vocale).
+
+Padding: paddingHorizontal 8, paddingBottom 12.
+Cassette wrapper: flex 1, alignItems center, justifyContent center, gap 6.
+
+
+==============================================================
+5. SCHERMATA PRINCIPALE — LANDSCAPE NATURALE
+==============================================================
+
+Layout (flex row):
+
+  COLONNA SINISTRA (flex 6):
+    [cassetta SVG centrata, flex 1]
+    [riga controlli: ControlButtons + normBtn + shuffleBtn + favBtn +
+     settingsBtn + TimeDisplay compact]
+
+  DIVISORE VERTICALE (1px, color #3a3a4a)
+
+  COLONNA DESTRA (flex 4):
+    [logo NasoSan full, cliccabile → nasosan.it]
+    [riga counter tracks]
+    [FlatList tracce, altezza piena, ogni riga 40px]
+
+Lista tracce landscape:
+  - Numero (2 cifre zero-padded), titolo (MarqueeText), artista, stella se favorito
+  - Riga attiva: bordo #64c8ff, testo #64c8ff
+  - Riga normale: testo #c8c8d2
+  - Tocco → seekToTrack (mantiene stato play/pausa)
+  - Scorrimento automatico sulla traccia attiva all'avvio
+
+
+==============================================================
+6. CASSETTA SVG (CassetteSVG.tsx)
+==============================================================
+
+Canvas SVG: 518 x 323 px, scala dinamica in base allo schermo.
+  - Portrait: larghezza = width - 24
+  - Landscape: min(width*0.62, 500) x (height-110), scala uniforme
+
+Immagine base: cassetta_base.png sovrapposta sopra le bobine.
+Le finestre ovali della cassetta nel PNG sono trasparenti, mostrano
+l'animazione delle bobine sottostanti.
+
+--- COSTANTI GEOMETRICHE ---
+Finestra bobine (RWX/Y/W/H):  x=42, y=104, w=434, h=154
+Bobina sinistra centro:        x=146.6, y=139
+Bobina destra centro:          x=363,   y=138
+Raggio mozzo (HUB_R):          35
+Raggio massimo nastro (MAX_R): 113
+Raggio minimo nastro:          48
+
+--- BOBINE ---
+Ogni bobina ha:
+  - Cerchio esterno (nastro avvolto): fill #7B3A10, raggio dinamico
+  - Anello mozzo esterno: fill #4a2008, r=HUB_R+2
+  - Disco mozzo: fill #1e1e10, stroke #64c8ff strokeWidth 1.5
+  - Croce sul mozzo: 2 linee #64c8ff strokeWidth 1.5
+  - Il tutto ruota con angolo animato
+
+Animazione bobine (setInterval 50ms quando in play/FF/RW):
+  - Play normale: velocità angolare = BASE(128) / raggio_corrente
+    La bobina che si svuota (sin) gira più lento man mano che si svuota;
+    quella che si riempie (dx) accelera. Progressione calcolata da sideProgress.
+  - FF: entrambe -9 gradi/tick (senso antiorario)
+  - RW: entrambe +9 gradi/tick (senso orario)
+
+--- NASTRO ---
+Striscia destra guida sx → guida dx: Rect x=218 y=160 w=66 h=7 fill #3a1808
+Linea bobina sx → guida sx: dinamica, capped a x=213 y=163
+Linea guida dx → bobina dx: dinamica, capped min x=297
+Guide nastro: Rect 5x10 rx=2 fill #666 a x=216 e x=284, y=158
+
+--- TITOLO CASSETTA (nome cartella) ---
+Posizione: x=195, y=74
+Font: corsivo bold, fontFamily="cursive", fontSize=68, fill=#1a1a1a
+Rotazione: -10 gradi attorno a (195, 74) — effetto scrittura a mano
+Troncato a 8 caratteri + "…" se >9 caratteri
+
+--- VERSIONE APP ---
+Posizione: x=402, y=87
+Font: monospace, fontSize=27, fill=#333333
+Contenuto: "v.1.280" (aggiornare ad ogni release)
+
+--- LOGO NS (icona piccola) ---
+SvgImage: x=421, y=101, 42x42, → nasosan.it al tocco
+
+--- TITOLO BRANO ---
+Area clip: x=50, y=198, w=418, h=28
+Testo: x=50-offset, y=213, fontSize=22, fontStyle=italic, fontFamily=serif, fill=#1a1a1a
+Scorrimento automatico (marquee) se testo > area clip:
+  delay 1200ms, velocità 20ms/px, delay fine 600ms, reset istantaneo.
+Tocco su area → apre modal modifica brano (pauseForScreen)
+
+--- ARTISTA BRANO ---
+Clip: y=244, h=24. Testo: y=260, stesse impostazioni titolo.
+(Nota: nell'implementazione attuale artista NON ha overlay tap visibile;
+ il tap sul titolo apre la modifica per entrambi i campi.)
+
+--- BADGE LATO A/B ---
+Posizione: x=22+18=40 (centro), y=300, fontSize=45, bold, fill=#64c8ff
+Animazione flip: Animated.scaleX 1→0→1 (220ms+220ms) al cambio lato
+Tocco badge → seekToTrack sul brano "speculare" (lato opposto, stessa posizione relativa)
+
+--- STELLA PREFERITO ---
+Posizione: cx=476, cy=281
+Stella 5 punte: R=20, r=8
+Riempita #64c8ff se favorita, solo bordo se no. strokeWidth 1.5
+Cerchio tap trasparente r=36 centrato sulla stella
+
+--- COUNTDOWN STOP ---
+Se stopCountdown != null: numero grande al centro finestra bobine
+x=(leftCx+rightCx)/2=254.8, y=152, fontSize=44, monospace, bold, fill=#64c8ff
+
+
+==============================================================
+7. WALKMAN VUOTO (WalkmanEmpty.tsx)
+==============================================================
+
+Mostrato quando nessuna cartella selezionata. Canvas 400x252.
+Corpo rettangolare: fill #2d2d2d, stroke #555, strokeWidth 2, rx=12
+Area etichetta top (6,6,388,68): fill #222230, logo nasosan_logo.png 200x52 centrato
+4 viti angoli: cerchi r=6 fill #444, croce #666
+Finestra bobine (28,82,344,120): fill #0a0a0a
+2 perni (cx 130 e 270, cy 148): doppio cerchio + croce #3a3a4a
+Guide nastro: 2 rect 9x8 fill #333
+Foro nastro inferiore: 34x9 fill #0a0a0a
+Tocco → handleCassetteTap (apre settings)
+
+
+==============================================================
+8. CONTROLLI PLAYBACK (ControlButtons.tsx)
+==============================================================
+
+Bottoni in riga (o colonna se vertical=true):
+  ⏮ PREV | ⏪ RW | ▶/⏸ PLAY/PAUSE | ■ STOP | ⏩ FF | ⏭ NEXT
+
+Stile base bottone: bg #2a2a36, border #4a4a5a 1.5px, borderRadius 6, 36px min
+Play/Pause: bg #149650, border #1db060, borderRadius 8, testo bianco
+FF e RW: pressIn/pressOut (hold continuo, non toggle)
+
+Ogni pressione: haptic Light + suono (SoundManager):
+  play → "play", stop → "stop", ff/rw → "ff", altri → "click"
+
+Props opzionali:
+  large: bottoni più grandi (prev/next 56px min, play 64px min)
+  mainOnly: solo prev+play+next
+  secondaryOnly: solo rw+stop+ff
+  vertical: layout colonna
+
+
+==============================================================
+9. BARRA INFERIORE — PORTRAIT (BottomRow.tsx)
+==============================================================
+
+Riga orizzontale, gap 6, paddingHorizontal 4:
+
+  [SHUF] [FAV] [TimeDisplay horizontal] [Counter] [⚙]
+
+SHUF: attivo con bordo #64c8ff. LongPress 3000ms → regenerateShuffle.
+FAV: stella piena/vuota. Press → toggle favorito traccia corrente.
+     LongPress 3000ms → toggleFavorites (filtra lista su soli favoriti).
+TimeDisplay: POS / DUR in formato M:SS, font monospace.
+Counter: "cur/tot" zero-padded (es. "03/12"), bg #16161e, font monospace #64c8ff.
+  Se showNoFavoritesMsg → mostra "no fav" per 3 secondi.
+⚙: apre /settings.
+
+
+==============================================================
+10. BOTTONE NORM (in index.tsx, non in BottomRow)
+==============================================================
+
+Testo icona: "N" (o numero corrente traccia analizzata, 2 cifre, durante analisi)
+Testo label: "NORM"
+
+Stati colore:
+  - Inattivo (non calcolato):  icona e label #e05555 (rosso)
+  - In analisi o pending:      icona e label #ffb432 (arancio)
+  - Attivo (gain applicato):   icona e label #64c8ff (blu)
+
+Press:
+  - Se in analisi → cancelNormalization
+  - Se pending    → normalizeGains (avvia)
+  - Se attivo     → clearNormalization
+  - Se inattivo   → normalizeGains
+
+LongPress 3000ms → resetNormalization (cancella RMS salvati, ricalcola da zero)
+
+
+==============================================================
+11. BOTTONI SECONDARI — PORTRAIT (in index.tsx)
+==============================================================
+
+SHUF, FAV, NORM, IMP (settings) appaiono nella riga portrait accanto a ControlButtons.
+In landscape appaiono nella riga inferiore sinistra assieme ai controlli.
+
+In portrait: riga [ControlButtons | normBtn], poi [BottomRow].
+In landscape: riga [ControlButtons normBtn shuffleBtn favBtn settingsBtn TimeDisplay].
+
+Nota: in portrait shuffleBtn, favBtn, settingsBtn sono in BottomRow (duplicati logici).
+      In landscape sono nella controlsRow (BottomRow non viene renderizzato).
+
+
+==============================================================
+12. MODAL MODIFICA BRANO
+==============================================================
+
+Appare su tap titolo o artista nella cassetta.
+Chiamata pauseForScreen() all'apertura, resumeAfterScreen() alla chiusura.
+Overlay trasparente, tocco fuori → chiude (annulla).
+Campi: Titolo e Artista (TextInput).
+Bottoni: Annulla (#962828 / #e05555) | Salva (#149650).
+Salva: editTrackMeta → aggiorna track in memoria e nel file JSON della cartella.
+Se campo vuoto → mantiene valore originale.
+
+
+==============================================================
+13. IMPOSTAZIONI (settings.tsx)
+==============================================================
+
+Header: freccia indietro (‹) + titolo "Impostazioni" centrato.
+useFocusEffect → pauseForScreen al focus, resumeAfterScreen all'uscita.
+
+Sezioni:
+
+A) CASSETTA
+   Card con LED verde/rosso + nome cartella + numero tracce.
+   Bottone verde "Inserisci cassetta" / "Cambia cassetta" → pickFolder (SAF).
+
+B) RIMUOVI CASSETTA (solo se cartella presente)
+   Bottone rosso "Espelli cassetta" → clearFolder.
+
+C) WIDGET SPEECHNOTES
+   Card con LED tricolore (rosso/giallo/verde) + stato testuale + pulsante toggle.
+   Stati:
+     - OFF   (rosso):  "Widget disabilitato" — bottone "OFF"
+     - GIALLO:         dipende dal sotto-stato:
+         * App non installata: "Speechnotes non installata" + pulsante
+           "Installa Speechnotes dal Play Store" sotto la card
+         * Errore bind/widget: "Widget non disponibile" + errorBox con msg
+     - VERDE (verde):  "Widget attivo"
+   Tocco pulsante:
+     - Da OFF:    controlla isInstalled() → se no → giallo + pulsante installa;
+                  se sì → requestBind() → verde (ok) o giallo+errore (fail)
+     - Da GIALLO: sempre → torna a OFF, pulisce stato e messaggio
+     - Da VERDE:  → unbind(), OFF
+   Protezione double-tap: pulsante disabilitato durante operazione async (speechnoteLoading).
+   speechnoteEnabled riletto da AsyncStorage ad ogni focus della schermata.
+
+D) Info footer (testo grigio piccolo)
+   "NasoSan Player — lettore musicale retro cassetta"
+   "Riproduce file locali. Nessun dato inviato online."
+
+
+==============================================================
+14. LOGICA PLAYER (PlayerContext.tsx)
+==============================================================
+
+--- INIZIALIZZAZIONE ---
+All'avvio: carica da AsyncStorage cartella, settings (shuffle/fav).
+Se cartella trovata: scanFolder(uri) per caricare le tracce.
+ensureRtpSetup(): configura NasoSanPlayer una sola volta.
+
+--- SCANSIONE CARTELLA ---
+SAF.readDirectoryAsync(uri) → filtra con regex AUDIO_EXTS:
+  /\.(mp3|flac|ogg|aac|m4a|wav|opus)$/i
+File ordinati alfabeticamente.
+Parsing nome file: "Artista - Titolo.ext" → artist + title separati.
+  Se nessun " - " → tutto come titolo, artista vuoto.
+ID3 tags letti per le nuove tracce (non già in cache).
+Posizione precedente ripristinata dalla cache.
+Shuffle order ripristinato se valido (stessi file).
+Gain (normalizzazione) ripristinato se presente.
+
+--- STRUTTURA TRACK ---
+{ id, filename, uri, title, artist, positionMs, favorite }
+id: indice numerico progressivo (0-based).
+
+--- LATO A / LATO B ---
+sideACount = ceil(tracks.length / 2)
+Lato A: tracce 0 … sideACount-1
+Lato B: tracce sideACount … end
+currentSide: "A" o "B" in base a currentIndexInActive
+sideProgress: 0.0→1.0, posizione dentro il lato corrente
+  = (indexInSide + positionMs/durationMs) / countInSide
+
+--- LISTA ATTIVA ---
+activeList = tracks filtrati per favoriti (se favoritesMode) e/o
+             riordinati per shuffle (se shuffleMode).
+currentIndexInActive = posizione corrente in activeList.
+
+--- PLAYBACK ---
+play():   setup queue su NasoSanPlayer, seek alla posizione salvata, play
+pause():  pause, salva posizione
+stop():   stop, posizione → 0, salva su file
+next():   traccia successiva in activeList (circolare), play
+prev():   se posizione > 3 secondi → restart; altrimenti traccia precedente
+FF/RW:   startFF/startRW avviano setInterval che fanno seekTo ripetutamente (+/-2s)
+          stopFF/stopRW fermano l'intervallo
+
+Stop countdown: schedulato in secondi, decrementa ogni secondo.
+  A zero: stop(). Tocco cassetta durante countdown → annulla + play.
+
+pauseForScreen() / resumeAfterScreen(): pausa per modal/settings, riprende se era in play.
+
+--- SALVATAGGIO DATI ---
+File "nasosanplayer_data.json" scritto nella cartella musicale (SAF).
+AsyncStorage come cache rapida (keys: @nasosan_data_*, @nasosan_folder, ecc.).
+Salvataggio automatico: su cambio traccia, stop, modifica, shuffle, favoriti.
+
+
+==============================================================
+15. NORMALIZZAZIONE VOLUME (VolumeAnalyzer)
+==============================================================
+
+Modulo nativo Android (Kotlin, iniettato da withVolumeAnalyzer.js):
+  - Analisi RMS via MediaCodec (decodifica PCM raw)
+  - Gain applicato via LoudnessEnhancer sull'audioSessionId del player Media3
+
+Algoritmo analisi (analyzeRMS):
+  1. Seek: se durata > 30s → seek a 30s; altrimenti a 0s.
+     Se campione a 30s è silenzio (n==0 dopo finestra) → retry a 0s.
+  2. Finestra analisi: 5 secondi × sampleRate × channels samples.
+  3. Filtra campioni silenzio: |s| > 0.001 (ignora silenzio puro).
+  4. RMS = sqrt(sumSq / n), convertito in dBFS = 20*log10(rms).
+  5. Se n==0 → ritorna -60dB.
+
+Calcolo gain per cassetta:
+  maxRms = valore più alto tra tutte le tracce.
+  gain(traccia) = max(0, maxRms - rms(traccia)) in dB.
+  Applicato con LoudnessEnhancer(sessionId).setTargetGain(gainDb * 100).
+  Range: 0–2000 mB (0–20 dB). Unità Android: 100 mB = 1 dB.
+
+Comportamento LoudnessEnhancer:
+  - Istanza creata UNA SOLA VOLTA per sessione audio (non ricreata ad ogni traccia).
+  - Cambio traccia: aggiorna solo targetGain e enabled sull'istanza esistente.
+  - gain <= 0.1 dB → enabled = false (nessun boost).
+  - gain > 0.1 dB → setTargetGain + enabled = true.
+  - Evita race condition: sessionId 0 non distrugge l'enhancer esistente.
+
+Progresso UI: durante analisi il bottone NORM mostra numero traccia corrente (2 cifre).
+RMS calcolati salvati in AsyncStorage (@nasosan_rms_*) per evitare ricalcoli.
+Gain salvati in AsyncStorage e nel file JSON della cartella.
+
+
+==============================================================
+16. CAR MODE / ANDROID AUTO
+==============================================================
+
+--- RILEVAMENTO CAR MODE ---
+Modulo nativo Android CarModeModule (withMedia3Player.js).
+Usa AudioDeviceCallback per rilevare connessione/disconnessione USB audio:
+  - onAudioDevicesAdded: device TYPE_USB_* → emette nasosan_car_enter
+  - onAudioDevicesRemoved: device TYPE_USB_* → emette nasosan_car_exit
+Nessun lock orientamento. Nessun retry: callback nativa è affidabile.
+
+Lato React Native (index.tsx):
+  - isCarMode state: inizializzato da CarModeModule.isInCarMode() al mount
+  - DeviceEventEmitter.addListener("nasosan_car_enter") → setIsCarMode(true)
+  - DeviceEventEmitter.addListener("nasosan_car_exit") → setIsCarMode(false) + pause()
+
+--- ANDROID AUTO (NasoSanPlaybackService) ---
+NasoSanPlaybackService estende MediaLibraryService.
+Registrato nel manifest con intent-filter per MediaLibraryService e MediaBrowserService.
+
+onConnect (controller AA):
+  1. Avvia auto-play se mediaItemCount > 0 (delay 1000ms).
+  2. Se widget Speechnotes abilitato (widget ID in SharedPrefs nasosan_prefs):
+     → lancia MainActivity in foreground (FLAG_ACTIVITY_NEW_TASK |
+       FLAG_ACTIVITY_REORDER_TO_FRONT, delay 1500ms).
+     Funziona anche se app era chiusa completamente.
+  3. Se widget NON abilitato → nessun cambio (background play come prima).
+
+onDisconnected (controller AA):
+  → player.pause() sul main thread.
+
+--- WIDGET SPEECHNOTES + CAR MODE ---
+Il widget Speechnotes nel player è visibile SOLO se:
+  speechnoteEnabled == true  (impostazione utente)
+  AND isCarMode == true      (cavo AA connesso)
+Se manca uno dei due → widget nascosto, comportamento normale invariato.
+
+
+==============================================================
+17. WIDGET SPEECHNOTES (SpeechnotesWidgetModule + ViewManager)
+==============================================================
+
+Integrazione widget Android AppWidgetHost per Speechnotes (co.speechnotes.speechnotes).
+Iniettato via withMedia3Player.js come moduli Kotlin.
+
+--- RILEVAMENTO APP ---
+Manifest Android include <queries><package android:name="co.speechnotes.speechnotes"/>
+</queries> per visibilità su Android API 30+.
+isInstalled(): getPackageInfo(PKG, 0) → true/false.
+
+--- SELEZIONE WIDGET ---
+Da AppWidgetManager.getInstalledProviders() filtrati per package Speechnotes:
+  → minByOrNull { minWidth * minHeight }  (prende il più piccolo = 1x1)
+  → fallback su firstOrNull() se minByOrNull fallisce
+  → errore se lista vuota.
+
+--- BIND WIDGET ---
+requestBind():
+  1. Se ID già in SharedPrefs → resolve con ID esistente.
+  2. bindAppWidgetIdIfAllowed() → se ok → salva ID, resolve.
+  3. Altrimenti → startActivityForResult(ACTION_APPWIDGET_BIND) →
+     onActivityResult → salva ID se RESULT_OK.
+Widget ID salvato in SharedPrefs "nasosan_prefs" chiave "speechnotes_widget_id".
+Richiede permesso BIND_APPWIDGET nel manifest.
+
+--- RENDERING (SpeechnotesWidgetViewManager) ---
+FrameLayout nativo che ospita AppWidgetHostView.
+onAfterUpdateTransaction: carica il widget se non ancora presente.
+onInterceptTouchEvent ACTION_DOWN → emette evento "onWidgetTap" a React Native.
+
+--- STATO IN ASYNCSTORAGE ---
+"speechnote_enabled": "true" / "false"
+Letto con useFocusEffect in index.tsx (aggiornato ad ogni focus).
+
+
+==============================================================
+18. SUONI E FEEDBACK
+==============================================================
+
+SoundManager.ts: suoni brevi per feedback UI.
+  Nomi: "click", "play", "stop", "ff"
+  Inizializzati una sola volta (initSounds() in ControlButtons useEffect).
+
+Haptic feedback su ogni interazione:
+  - Light: press normale
+  - Medium: long press
+  - Heavy: azioni distruttive (espelli cassetta)
+
+
+==============================================================
+19. PERSISTENZA DATI — SCHEMA CHIAVI ASYNCSTORAGE
+==============================================================
+
+@nasosan_folder                → URI cartella musicale corrente
+@nasosan_settings              → { shuffleMode, favoritesMode }
+@nasosan_data_<encodedUri>     → FolderData (tracks, shuffle, currentTrackId, edits)
+@nasosan_gains_<encodedUri>    → Record<uri, gainDb> (gain per traccia)
+@nasosan_rms_<encodedUri>      → Record<filename, rmsDb> (RMS calcolati)
+speechnote_enabled             → "true" / "false" (widget Speechnotes)
+
+File nella cartella musicale:
+  nasosanplayer_data.json      → stessa struttura di @nasosan_data_*
+
+
+==============================================================
+20. MARQUEE TEXT
+==============================================================
+
+Componente MarqueeText (in index.tsx): testo che scorre orizzontalmente
+se supera la larghezza del contenitore. Usato per titoli in lista landscape.
+
+Animazione: delay 1000ms → scorri → delay 600ms → reset istantaneo → loop.
+Velocità: 22ms per pixel di distanza.
+
+Nella cassetta SVG: implementazione manuale con titleOffset state +
+Animated.Value + listener. CharWidth stimato: 11px per carattere.
+Delay iniziale 1200ms, 20ms/px, delay fine 600ms.
+
+
+==============================================================
+21. CONTATORE TRACCE
+==============================================================
+
+Formato: "cur/tot" con zero-padding adattivo:
+  1-9 tracce:    "1/9"
+  10-99 tracce:  "01/12"
+  100-999:       "001/123"
+  1000+:         "0001/1234"
+cur = currentIndexInActive + 1 (1-based per display).
+
+
+==============================================================
+22. VERSIONE APP
+==============================================================
+
+Schema versione: 0.xy (beta) → 1.xy e seguenti (release).
+Incremento: +0.01 per correzioni, +0.05 per aggiunte/rimozioni.
+Una sola versione per richiesta di modifica.
+
+Definita in DUE SOLI POSTI (devono sempre coincidere):
+  1. constants/app.ts   → APP_VERSION_DISPLAY = "v.1.28"
+  2. CassetteSVG.tsx    → stringa versione nella SVG
+
+versionCode Android (app.json): incrementare ad ogni build pubblicata.
+
+
+==============================================================
+23. INTESTAZIONI FILE CODICE
+==============================================================
+
+Prima riga di ogni file sorgente:
+  // Analyst: NasoSan | Dev: Claude AI
+  // Licenza: CC BY 4.0 – nasosan.it | https://creativecommons.org/licenses/by/4.0/
+
+I file-sezione (.js plugin) non portano numero versione diretto;
+usano la variabile del file base.
+
+
+==============================================================
+FIN DEL DOCUMENTO
+==============================================================
