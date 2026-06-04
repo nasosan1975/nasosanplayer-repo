@@ -25,7 +25,8 @@ export async function getSilentPlaceholderUri(): Promise<string> {
   const dir = `${FileSystem.cacheDirectory}${SILENT_VER}/`;
   const filePath = `${dir}silence.wav`;
   await FileSystem.makeDirectoryAsync(dir, { intermediates: true }).catch(() => {});
-  const info = await FileSystem.getInfoAsync(filePath);
+  let info: { exists: boolean } = { exists: false };
+  try { info = await FileSystem.getInfoAsync(filePath); } catch {}
   if (info.exists) { _uri = filePath; return filePath; }
   const b64 = buildSilentWav(30);
   await FileSystem.writeAsStringAsync(filePath, b64, { encoding: FileSystem.EncodingType.Base64 });
