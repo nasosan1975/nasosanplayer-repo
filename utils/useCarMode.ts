@@ -1,15 +1,11 @@
 import { useEffect, useState } from "react";
 import { DeviceEventEmitter, NativeModules, Platform } from "react-native";
-import * as ScreenOrientation from "expo-screen-orientation";
-import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
 
 const CarModeModule = NativeModules.CarModeModule as {
   startListening: () => void;
   stopListening: () => void;
   isInCarMode: () => Promise<boolean>;
 } | undefined;
-
-const TAG = "NasoSanCarMode";
 
 export function useCarMode(): boolean {
   const [isCarMode, setIsCarMode] = useState(false);
@@ -20,26 +16,16 @@ export function useCarMode(): boolean {
     let active = true;
     let inCar = false;
 
-    async function enterCar() {
+    function enterCar() {
       if (!active || inCar) return;
       inCar = true;
       setIsCarMode(true);
-      try {
-        await ScreenOrientation.lockAsync(
-          ScreenOrientation.OrientationLock.LANDSCAPE
-        );
-        await activateKeepAwakeAsync(TAG);
-      } catch {}
     }
 
-    async function exitCar() {
+    function exitCar() {
       if (!active) return;
       inCar = false;
       setIsCarMode(false);
-      try {
-        await ScreenOrientation.unlockAsync();
-        deactivateKeepAwake(TAG);
-      } catch {}
     }
 
     // Controlla stato iniziale (app aperta mentre già connessa)
@@ -74,8 +60,6 @@ export function useCarMode(): boolean {
       CarModeModule?.stopListening();
       enterSub.remove();
       exitSub.remove();
-      ScreenOrientation.unlockAsync().catch(() => {});
-      try { deactivateKeepAwake(TAG); } catch {}
     };
   }, []);
 
