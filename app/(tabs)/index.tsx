@@ -1,5 +1,5 @@
 import * as Haptics from "expo-haptics";
-import { router } from "expo-router";
+import { router, useFocusEffect } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import React, { useEffect, useRef, useState } from "react";
 import {
@@ -9,12 +9,15 @@ import {
   Keyboard,
   Linking,
   Modal,
+  DeviceEventEmitter,
+  NativeModules,
   Platform,
   StyleSheet,
   Text,
   TextInput,
   TouchableOpacity,
   View,
+  requireNativeComponent,
   useWindowDimensions,
 } from "react-native";
 
@@ -24,7 +27,16 @@ import ControlButtons from "@/components/ControlButtons";
 import TimeDisplay from "@/components/TimeDisplay";
 import WalkmanEmpty from "@/components/WalkmanEmpty";
 import { Track, usePlayer } from "@/context/PlayerContext";
-import { useCarMode } from "@/utils/useCarMode";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
+import { C } from "@/constants/colors";
+
+const SpeechnotesWidgetView = requireNativeComponent<{ onWidgetTap?: (e: any) => void; onWidgetError?: (e: any) => void; style?: any }>("SpeechnotesWidgetView");
+const CarModeModule = NativeModules.CarModeModule as {
+  isInCarMode(): Promise<boolean>;
+  startListening(): void;
+} | undefined;
+
 
 const LOGO_FULL = require("../../assets/images/nasosan_logo_full.png");
 
@@ -77,12 +89,15 @@ export default function PlayerScreen() {
     currentTrack,
     currentTrackId,
     isPlaying,
+    isPaused,
     currentSide,
     sideProgress,
     toggleFavorite,
     stopCountdown,
     cancelStop,
     play,
+    pause,
+    stop,
     activeList,
     currentIndexInActive,
     seekToTrack,
@@ -97,20 +112,48 @@ export default function PlayerScreen() {
     showNoFavoritesMsg,
     pauseForScreen,
     resumeAfterScreen,
-    isWmaConverting,
     normalizeGains,
     isNormalizing,
     normalizationActive,
+    normalizationPending,
     normalizingProgress,
     clearNormalization,
     resetNormalization,
+    cancelNormalization,
   } = usePlayer();
+
 
   const [editTarget, setEditTarget] = useState<Track | null>(null);
   const [editTitleVal, setEditTitleVal] = useState("");
   const [editArtistVal, setEditArtistVal] = useState("");
+  const [speechnoteEnabled, setSpeechnoteEnabled] = useState(false);
+  const [isCarMode, setIsCarMode] = useState(false);
+  const [widgetError, setWidgetError] = useState<string | null>(null);
 
-  const isCarMode = useCarMode();
+  useFocusEffect(
+    React.useCallback(() => {
+      AsyncStorage.getItem("speechnote_enabled").then(v => setSpeechnoteEnabled(v === "true")).catch(() => {});
+    }, [])
+  );
+
+  useEffect(() => {
+    if (!CarModeModule) return;
+    CarModeModule.isInCarMode().then(v => setIsCarMode(v)).catch(() => {});
+    CarModeModule.startListening();
+    const enterSub = DeviceEventEmitter.addListener("nasosan_car_enter", () => setIsCarMode(true));
+    const exitSub = DeviceEventEmitter.addListener("nasosan_car_exit", () => {
+      setIsCarMode(false);
+      pause();
+    });
+    return () => {
+      enterSub.remove();
+      exitSub.remove();
+    };
+  }, []);
+
+  function handleWidgetTap() {
+    if (isPlaying) pause();
+  }
 
   const insets = useSafeAreaInsets();
   const { width, height } = useWindowDimensions();
@@ -236,7 +279,7 @@ export default function PlayerScreen() {
               autoFocus
               returnKeyType="next"
               blurOnSubmit={false}
-              placeholderTextColor="#4a4a5a"
+              placeholderTextColor={C.borderInput}
               placeholder="Titolo…"
             />
             <Text style={styles.modalFieldLabel}>Artista</Text>
@@ -246,7 +289,7 @@ export default function PlayerScreen() {
               onChangeText={setEditArtistVal}
               returnKeyType="done"
               onSubmitEditing={handleEditSave}
-              placeholderTextColor="#4a4a5a"
+              placeholderTextColor={C.borderInput}
               placeholder="Artista…"
             />
             <View style={styles.modalBtnRow}>
@@ -291,11 +334,19 @@ export default function PlayerScreen() {
   const favBtn = (
     <TouchableOpacity
       style={[styles.secBtn, favoritesMode && styles.secBtnActive]}
-      onPress={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); toggleFavorites(); }}
+      onPress={() => {
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+        if (currentTrack) toggleFavorite(currentTrack.id);
+      }}
+      onLongPress={() => {
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+        toggleFavorites();
+      }}
+      delayLongPress={3000}
       activeOpacity={0.7}
     >
-      <Text style={[styles.secBtnIcon, favoritesMode && styles.secBtnIconActive]}>
-        {favoritesMode ? "★" : "☆"}
+      <Text style={[styles.secBtnIcon, currentTrack?.favorite && styles.secBtnIconActive]}>
+        {currentTrack?.favorite ? "★" : "☆"}
       </Text>
       <Text style={[styles.secBtnLabel, favoritesMode && styles.secBtnLabelActive]}>FAV</Text>
     </TouchableOpacity>
@@ -305,13 +356,14 @@ export default function PlayerScreen() {
     <TouchableOpacity
       style={[
         styles.secBtn,
-        !normalizationActive && !isNormalizing && styles.normBtnOff,
-        normalizationActive && styles.normBtnActive,
-        isNormalizing && styles.normBtnAnalyzing,
+        !normalizationActive && !isNormalizing && !normalizationPending && styles.normBtnOff,
+        normalizationActive && !normalizationPending && styles.normBtnActive,
+        (isNormalizing || normalizationPending) && styles.normBtnAnalyzing,
       ]}
       onPress={() => {
         Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-        if (isNormalizing) return;
+        if (isNormalizing) { cancelNormalization(); return; }
+        if (normalizationPending) { normalizeGains(); return; }
         if (normalizationActive) clearNormalization();
         else normalizeGains();
       }}
@@ -324,19 +376,19 @@ export default function PlayerScreen() {
     >
       <Text style={[
         styles.secBtnIcon,
-        normalizationActive && styles.normBtnIconActive,
-        isNormalizing && { color: "#ffb432" },
-        !normalizationActive && !isNormalizing && { color: "#e05555" },
+        normalizationActive && !normalizationPending && styles.normBtnIconActive,
+        (isNormalizing || normalizationPending) && { color: C.warning },
+        !normalizationActive && !isNormalizing && !normalizationPending && { color: C.error },
       ]}>
         {isNormalizing && normalizingProgress
-          ? String(normalizingProgress.current).padStart(2, "0")
+          ? String(normalizingProgress?.current ?? 0).padStart(2, "0")
           : "N"}
       </Text>
       <Text style={[
         styles.secBtnLabel,
-        normalizationActive && styles.normBtnLabelActive,
-        isNormalizing && { color: "#ffb432" },
-        !normalizationActive && !isNormalizing && { color: "#e05555" },
+        normalizationActive && !normalizationPending && styles.normBtnLabelActive,
+        (isNormalizing || normalizationPending) && { color: C.warning },
+        !normalizationActive && !isNormalizing && !normalizationPending && { color: C.error },
       ]}>
         {"NORM"}
       </Text>
@@ -355,145 +407,78 @@ export default function PlayerScreen() {
     </>
   );
 
-  // Riga unica controlli — SOLO car mode (con counter, full width)
-  const lsControlsRow = (
-    <View style={[styles.landscapeSingleRow, { paddingBottom: botPad }]}>
-      {controlsContent}
-      <View style={styles.counterBox}>
-        <Text style={styles.counterText}>
-          {showNoFavoritesMsg ? "no fav" : formatCounter(currentIndexInActive, activeList.length)}
-        </Text>
-      </View>
-    </View>
-  );
-
-  /* ── CAR MODE (cavo USB) — cassetta centrata, niente lista, una riga ──── */
-  if (isCarMode) {
-    return (
-      <View style={[styles.carModeRoot, { paddingTop: topPad }]}>
-        {/* Cassetta centrata */}
-        <View style={styles.lsCassetteArea}>
-          {cassetteNode}
-        </View>
-        {/* Riga controlli car mode — prev/play/next grandi */}
-        <View style={[styles.landscapeSingleRow, { paddingBottom: botPad }]}>
-          <ControlButtons large />
-          {normBtn}
-          <TouchableOpacity
-            style={[styles.secBtn, shuffleMode && styles.secBtnActive]}
-            onPress={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); toggleShuffle(); }}
-            onLongPress={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium); regenerateShuffle(); }}
-            delayLongPress={3000}
-            activeOpacity={0.7}
-          >
-            <Text style={[styles.secBtnIcon, shuffleMode && styles.secBtnIconActive]}>{"⇄"}</Text>
-            <Text style={[styles.secBtnLabel, shuffleMode && styles.secBtnLabelActive]}>SHUF</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.secBtn, favoritesMode && styles.secBtnActive]}
-            onPress={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); toggleFavorites(); }}
-            activeOpacity={0.7}
-          >
-            <Text style={[styles.secBtnIcon, favoritesMode && styles.secBtnIconActive]}>
-              {favoritesMode ? "★" : "☆"}
-            </Text>
-            <Text style={[styles.secBtnLabel, favoritesMode && styles.secBtnLabelActive]}>FAV</Text>
-          </TouchableOpacity>
-          {settingsBtn}
-          <TimeDisplay compact />
-          <View style={styles.counterBox}>
-            <Text style={styles.counterText}>
-              {showNoFavoritesMsg
-                ? "no fav"
-                : isWmaConverting
-                ? "elab..."
-                : formatCounter(currentIndexInActive, activeList.length)}
-            </Text>
-          </View>
-        </View>
-        {editModal}
-      </View>
-    );
-  }
-
-  /* ── LANDSCAPE NATURALE (senza cavo) — cassetta sx + lista dx ──────────── */
+  /* ── LANDSCAPE NATURALE — cassetta + lista, controlli in basso ── */
   if (isNaturalLandscape) {
     return (
-      <View style={[styles.carModeRoot, { paddingTop: topPad }]}>
-        {/* Riga superiore: cassetta sinistra + divisore + logo/lista destra */}
-        <View style={styles.lsBodyRow}>
+      <View style={[styles.lsRoot, { paddingTop: topPad, paddingBottom: botPad }]}>
+        {/* SINISTRA: cassetta + controlli */}
+        <View style={styles.lsLeft}>
           <View style={styles.lsCassetteArea}>
             {cassetteNode}
           </View>
-          <View style={styles.lsDivider} />
-          <View style={styles.lsRight}>
-            <TouchableOpacity
-              style={styles.lsLogoWrapper}
-              onPress={() => Linking.openURL("https://www.nasosan.it")}
-              activeOpacity={0.7}
-            >
-              <Image source={LOGO_FULL} style={styles.lsLogo} resizeMode="contain" />
-            </TouchableOpacity>
-            <View style={styles.lsCounterRow}>
-              <Text style={styles.counterText}>
-                {showNoFavoritesMsg
-                  ? "no fav"
-                  : isWmaConverting
-                  ? "elaborazione..."
-                  : formatCounter(currentIndexInActive, activeList.length)}
-              </Text>
-            </View>
-            <FlatList
-              ref={flatListRef}
-              data={activeList}
-              keyExtractor={(item) => String(item.id)}
-              showsVerticalScrollIndicator={false}
-              style={{ flex: 1 }}
-              contentContainerStyle={styles.lsListContent}
-              getItemLayout={(_data, index) => ({
-                length: LS_ROW_H,
-                offset: LS_ROW_H * index,
-                index,
-              })}
-              renderItem={({ item, index }) => {
-                const isActive = item.id === currentTrackId;
-                return (
-                  <TouchableOpacity
-                    style={[styles.lsTrackRow, isActive && styles.lsTrackRowActive]}
-                    onPress={() => seekToTrack(item.id, isPlaying)}
-                    activeOpacity={0.7}
-                  >
-                    <Text style={[styles.lsTrackNum, isActive && styles.lsTrackNumActive]}>
-                      {String(index + 1).padStart(2, "0")}
-                    </Text>
-                    <View style={styles.lsTrackInfo}>
-                      <MarqueeText
-                        text={item.title}
-                        style={[styles.lsTrackTitle, isActive && styles.lsTrackTitleActive]}
-                        containerStyle={{ flex: 1 }}
-                      />
-                      {item.artist ? (
-                        <Text style={styles.lsTrackArtist} numberOfLines={1}>
-                          {item.artist}
-                        </Text>
-                      ) : null}
-                    </View>
-                    {item.favorite && (
-                      <Text style={styles.lsTrackStar}>{"★"}</Text>
-                    )}
-                  </TouchableOpacity>
-                );
-              }}
-            />
-          </View>
-        </View>
-        {/* Riga controlli centrata sotto la cassetta */}
-        <View style={[styles.lsBottomRow, { paddingBottom: botPad }]}>
-          <View style={styles.lsControlsUnderCassette}>
+          <View style={styles.lsControlsRow}>
             {controlsContent}
           </View>
-          <View style={styles.lsDivider} />
-          <View style={styles.lsControlsUnderRight} />
+        </View>
+        <View style={styles.lsDivider} />
+        {/* DESTRA: lista piena altezza */}
+        <View style={styles.lsRight}>
+          <TouchableOpacity
+            style={styles.lsLogoWrapper}
+            onPress={() => Linking.openURL("https://www.nasosan.it")}
+            activeOpacity={0.7}
+          >
+            <Image source={LOGO_FULL} style={styles.lsLogo} resizeMode="contain" />
+          </TouchableOpacity>
+          <View style={styles.lsCounterRow}>
+            <Text style={styles.counterText}>
+              {showNoFavoritesMsg
+                ? "no fav"
+                : formatCounter(currentIndexInActive, activeList.length)}
+            </Text>
+          </View>
+          <FlatList
+            ref={flatListRef}
+            data={activeList}
+            keyExtractor={(item) => String(item.id)}
+            showsVerticalScrollIndicator={false}
+            style={{ flex: 1 }}
+            contentContainerStyle={styles.lsListContent}
+            getItemLayout={(_data, index) => ({
+              length: LS_ROW_H,
+              offset: LS_ROW_H * index,
+              index,
+            })}
+            renderItem={({ item, index }) => {
+              const isActive = item.id === currentTrackId;
+              return (
+                <TouchableOpacity
+                  style={[styles.lsTrackRow, isActive && styles.lsTrackRowActive]}
+                  onPress={() => seekToTrack(item.id, isPlaying)}
+                  activeOpacity={0.7}
+                >
+                  <Text style={[styles.lsTrackNum, isActive && styles.lsTrackNumActive]}>
+                    {String(index + 1).padStart(2, "0")}
+                  </Text>
+                  <View style={styles.lsTrackInfo}>
+                    <MarqueeText
+                      text={item.title}
+                      style={[styles.lsTrackTitle, isActive && styles.lsTrackTitleActive]}
+                      containerStyle={{ flex: 1 }}
+                    />
+                    {item.artist ? (
+                      <Text style={styles.lsTrackArtist} numberOfLines={1}>
+                        {item.artist}
+                      </Text>
+                    ) : null}
+                  </View>
+                  {item.favorite && (
+                    <Text style={styles.lsTrackStar}>{"★"}</Text>
+                  )}
+                </TouchableOpacity>
+              );
+            }}
+          />
         </View>
         {editModal}
       </View>
@@ -518,8 +503,25 @@ export default function PlayerScreen() {
       {!folderUri && (
         <Text style={styles.hint}>Tocca il player per selezionare una cassetta</Text>
       )}
-      {isWmaConverting && (
-        <Text style={styles.wmaHint}>elaborazione in corso...</Text>
+
+      {speechnoteEnabled && isCarMode && (
+        <View style={styles.speechnoteArea}>
+          <View style={{ flex: 1 }} />
+          {widgetError ? (
+            <View style={[styles.speechnoteWidget, { justifyContent: "center", alignItems: "center" }]}>
+              <Text style={{ color: C.warning, fontSize: 12, textAlign: "center", paddingHorizontal: 8 }}>
+                {widgetError}
+              </Text>
+            </View>
+          ) : (
+            <SpeechnotesWidgetView
+              style={styles.speechnoteWidget}
+              onWidgetTap={handleWidgetTap}
+              onWidgetError={(e: any) => setWidgetError(e?.nativeEvent?.error ?? "Errore widget")}
+            />
+          )}
+          <View style={{ flex: 1 }} />
+        </View>
       )}
 
       <View style={styles.controlsArea}>
@@ -538,9 +540,18 @@ export default function PlayerScreen() {
 const styles = StyleSheet.create({
   root: {
     flex: 1,
-    backgroundColor: "#1e1e26",
+    backgroundColor: C.background,
     alignItems: "center",
     justifyContent: "space-between",
+  },
+  speechnoteArea: {
+    flex: 1,
+    width: "100%",
+    flexDirection: "column",
+  },
+  speechnoteWidget: {
+    flex: 8,
+    width: "100%",
   },
   cassetteWrapper: {
     flex: 1,
@@ -570,82 +581,47 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   hint: {
-    color: "#4a4a5a",
+    color: C.borderInput,
     fontSize: 13,
     textAlign: "center",
     marginTop: 4,
     marginBottom: 8,
   },
-  wmaHint: {
-    color: "#ffb432",
-    fontSize: 11,
-    textAlign: "center" as const,
-    letterSpacing: 0.8,
-    fontFamily: "monospace" as const,
-    marginBottom: 6,
-  },
 
-  carModeRoot: {
+  lsRoot: {
     flex: 1,
-    backgroundColor: "#1e1e26",
-    flexDirection: "column",
-    alignItems: "stretch",
-    justifyContent: "space-between",
+    backgroundColor: C.background,
+    flexDirection: "row",
     paddingHorizontal: 8,
   },
-  lsBodyRow: {
-    flex: 1,
-    flexDirection: "row",
-    width: "100%",
-  },
-  landscapeRoot: {
-    flex: 1,
-    backgroundColor: "#1e1e26",
-    flexDirection: "row",
-  },
   lsLeft: {
-    flex: 1,
+    flex: 6,
     flexDirection: "column",
-    alignItems: "center",
     justifyContent: "space-between",
-    paddingHorizontal: 6,
-    paddingVertical: 6,
   },
   lsCassetteArea: {
-    flex: 6,
+    flex: 1,
     alignItems: "center",
     justifyContent: "center",
+    paddingTop: 8,
   },
-  logoTopRight: {
-    position: "absolute",
-    right: 8,
-    top: "50%" as unknown as number,
-    marginTop: -19,
-    zIndex: 2,
-  },
-  logoLandscape: {
-    width: 108,
-    height: 38,
-  },
-  landscapeSingleRow: {
+  lsControlsRow: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "flex-start",
     gap: 4,
     flexWrap: "nowrap",
-    width: "100%",
-    paddingHorizontal: 8,
-    paddingTop: 4,
-    paddingBottom: 8,
+    paddingHorizontal: 4,
+    paddingVertical: 4,
   },
   lsDivider: {
     width: 1,
-    backgroundColor: "#3a3a4a",
+    backgroundColor: C.separators,
     marginVertical: 8,
   },
   lsRight: {
     flex: 4,
-    backgroundColor: "#1e1e26",
+    backgroundColor: C.background,
     flexDirection: "column",
     overflow: "hidden",
   },
@@ -660,9 +636,9 @@ const styles = StyleSheet.create({
     height: 32,
   },
   lsCounterRow: {
-    backgroundColor: "#16161e",
+    backgroundColor: C.dark,
     borderBottomWidth: 1,
-    borderBottomColor: "#3a3a4a",
+    borderBottomColor: C.separators,
     paddingHorizontal: 8,
     paddingVertical: 4,
     alignItems: "center",
@@ -671,25 +647,6 @@ const styles = StyleSheet.create({
     paddingVertical: 4,
     flexGrow: 1,
   },
-  lsBottomRow: {
-    flexDirection: "row",
-    width: "100%",
-    alignItems: "center",
-    paddingTop: 4,
-  },
-  lsControlsUnderCassette: {
-    flex: 6,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "flex-start",
-    gap: 4,
-    flexWrap: "nowrap",
-    paddingHorizontal: 4,
-    paddingVertical: 4,
-  },
-  lsControlsUnderRight: {
-    flex: 4,
-  },
   lsTrackRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -697,13 +654,13 @@ const styles = StyleSheet.create({
     height: 40,
     gap: 6,
     borderBottomWidth: 1,
-    borderBottomColor: "#2a2a36",
+    borderBottomColor: C.panels,
   },
   lsTrackRowActive: {
-    backgroundColor: "#2a2a36",
+    backgroundColor: C.panels,
   },
   lsTrackNum: {
-    color: "#4a4a5a",
+    color: C.borderInput,
     fontFamily: "monospace" as const,
     fontSize: 10,
     lineHeight: 14,
@@ -711,19 +668,19 @@ const styles = StyleSheet.create({
     textAlign: "right",
   },
   lsTrackNumActive: {
-    color: "#64c8ff",
+    color: C.accent,
   },
   lsTrackInfo: {
     flex: 1,
     gap: 1,
   },
   lsTrackTitle: {
-    color: "#c8c8d2",
+    color: C.text,
     fontSize: 12,
     lineHeight: 15,
   },
   lsTrackTitleActive: {
-    color: "#64c8ff",
+    color: C.accent,
     fontWeight: "600" as const,
   },
   lsTrackArtist: {
@@ -732,20 +689,13 @@ const styles = StyleSheet.create({
     lineHeight: 13,
   },
   lsTrackStar: {
-    color: "#c8c8d2",
+    color: C.text,
     fontSize: 10,
     lineHeight: 14,
   },
-  lsBottomBar: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 4,
-    width: "100%",
-    paddingTop: 4,
-  },
   secBtn: {
-    backgroundColor: "#2a2a36",
-    borderColor: "#4a4a5a",
+    backgroundColor: C.panels,
+    borderColor: C.borderInput,
     borderWidth: 1.5,
     borderRadius: 6,
     paddingHorizontal: 8,
@@ -753,40 +703,41 @@ const styles = StyleSheet.create({
     alignItems: "center",
     minWidth: 36,
   },
-  secBtnActive: { borderColor: "#64c8ff" },
-  normBtnOff: { borderColor: "#962828", backgroundColor: "#2a1010" },
-  normBtnActive: { borderColor: "#64c864", backgroundColor: "#102010" },
-  normBtnAnalyzing: { borderColor: "#ffb432", backgroundColor: "#2a2010" },
-  normBtnIconActive: { color: "#64c864" },
-  normBtnLabelActive: { color: "#64c864" },
-  secBtnIcon: { fontSize: 16, color: "#c8c8d2", lineHeight: 20 },
-  secBtnIconActive: { color: "#64c8ff" },
+  secBtnActive: { borderColor: C.accent },
+  normBtnOff: { borderColor: C.normOffBorder, backgroundColor: C.errorBg },
+  normBtnActive: { borderColor: C.ok, backgroundColor: C.normActiveBg },
+  normBtnAnalyzing: { borderColor: C.warning, backgroundColor: C.normAnalyzingBg },
+  normBtnIconActive: { color: C.ok },
+  normBtnLabelActive: { color: C.ok },
+  secBtnIcon: { fontSize: 16, color: C.text, lineHeight: 20 },
+  secBtnIconActive: { color: C.accent },
   secBtnLabel: {
-    color: "#8cc8ff",
+    color: C.notes,
     fontSize: 7,
     marginTop: 1,
     fontFamily: "monospace" as const,
   },
-  secBtnLabelActive: { color: "#64c8ff" },
+  secBtnLabelActive: { color: C.accent },
 
   counterBox: {
     flex: 1,
-    backgroundColor: "#16161e",
+    backgroundColor: C.dark,
     borderRadius: 6,
     borderWidth: 1,
-    borderColor: "#3a3a4a",
+    borderColor: C.separators,
     paddingHorizontal: 6,
     paddingVertical: 5,
     alignItems: "center",
     justifyContent: "center",
   },
   counterText: {
-    color: "#64c8ff",
+    color: C.accent,
     fontFamily: "monospace" as const,
     fontSize: 11,
     lineHeight: 14,
     letterSpacing: 1,
   },
+
   modalOverlay: {
     flex: 1,
     backgroundColor: "rgba(0,0,0,0.72)",
@@ -794,33 +745,33 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   modalCard: {
-    backgroundColor: "#2a2a36",
+    backgroundColor: C.panels,
     borderRadius: 10,
     borderWidth: 1,
-    borderColor: "#3a3a4a",
+    borderColor: C.separators,
     padding: 20,
     width: 300,
     gap: 12,
   },
   modalLabel: {
-    color: "#64c8ff",
+    color: C.accent,
     fontSize: 11,
     letterSpacing: 1.4,
     fontWeight: "600",
     marginBottom: 4,
   },
   modalFieldLabel: {
-    color: "#8cc8ff",
+    color: C.notes,
     fontSize: 11,
     letterSpacing: 0.8,
     marginTop: 4,
   },
   modalInput: {
-    backgroundColor: "#16161e",
+    backgroundColor: C.dark,
     borderWidth: 1,
-    borderColor: "#64c8ff",
+    borderColor: C.accent,
     borderRadius: 6,
-    color: "#c8c8d2",
+    color: C.text,
     fontSize: 15,
     paddingHorizontal: 10,
     paddingVertical: 8,
@@ -835,16 +786,17 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     borderRadius: 6,
     borderWidth: 1,
-    borderColor: "#3a3a4a",
+    borderColor: C.separators,
   },
-  modalBtnCancelText: { color: "#8cc8ff", fontSize: 14 },
+  modalBtnCancelText: { color: C.notes, fontSize: 14 },
   modalBtnSave: {
     paddingHorizontal: 16,
     paddingVertical: 8,
     borderRadius: 6,
-    backgroundColor: "#149650",
+    backgroundColor: C.playGreen,
     borderWidth: 1,
-    borderColor: "#1db060",
+    borderColor: C.playBorder,
   },
   modalBtnSaveText: { color: "white", fontSize: 14, fontWeight: "600" },
+
 });
