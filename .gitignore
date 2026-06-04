@@ -42,3 +42,6 @@ yarn-error.*
 
 # Script con token locali — non committare
 build-apk_github.ps1
+
+# APK locali
+*.apk
